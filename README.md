@@ -19,8 +19,8 @@
     <img align = "center"alt = "wordpress"src= https://img.shields.io/badge/Wordpress-21759B?style=for-the-badge&logo=wordpress&logoColor=white/>
     
 
-### Currently Working On: Startup Management as Data, mapping companies with innovation potential to present the startup acceleration and pre-acceleration program.
+### Currently Working On: FAPES (research support foundation from ES) as Web Php Developer for 1+ year
 
-### My job is basically to develop a database with company information such as size, number of employees and evaluate whether it is worth developing an acceleration program in that region.
+### My job is basically to develop and maintence two websites with laravel, and Vue Framework 
 
-### Executed by Bbutton ventures S/A (a venture capital and angel investment company) together with Bussola Hub and SOMA urbanismo.
+### Currently Job
