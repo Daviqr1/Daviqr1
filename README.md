@@ -1,4 +1,4 @@
-# 🚀 Davi Rezende | IoT & AI Developer
+# 🚀 Davi Rezende | FullStack / IoT Developer
 
 <div align="center">
   
