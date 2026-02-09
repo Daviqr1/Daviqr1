@@ -112,15 +112,6 @@ const myCurrentJob: CurrentWork = {
 - 🌱 Sempre aprendendo novas tecnologias
 - ⚡ Compartilhando conhecimento com a comunidade dev
 
-## 🌟 **Principais Projetos**
-
-```bash
-# Alguns dos meus trabalhos mais relevantes
-git clone https://github.com/daviqr1/projeto-iot-agricultura
-git clone https://github.com/daviqr1/app-mobile-react-native
-git clone https://github.com/daviqr1/sistema-web-laravel
-```
-
 ## 🤝 **Vamos conectar?**
 
 <div align="center">
