@@ -1,6 +1,6 @@
 # Davi Barros de Rezende
 
-**Senior Software Engineer — Generative AI & mission-critical systems.**
+**Software Engineer — TypeScript, Node/NestJS, React, PostgreSQL · LLM systems in production.**
 TypeScript · Node/NestJS · React · Python · PostgreSQL · Vitória, Brazil (UTC−3) · Remote
 
 I build the layer that makes LLMs survive production: gateways with fallback budgets,
