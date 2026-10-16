@@ -9,6 +9,8 @@ estresse, quando, com quem, e o que isso faz com o seu sono e o seu treino**.
 > pulso, é o que a Garmin deixa sair dele — então o Pulso captura o máximo permitido e faz o
 > processamento pesado onde há CPU. Detalhes: [o que dá e o que não dá](docs/o-que-da-e-o-que-nao-da.md).
 
+**Para rodar no seu PC: [COMECE-AQUI.md](COMECE-AQUI.md).**
+
 ## O que tem aqui
 
 | Peça | O que faz |
