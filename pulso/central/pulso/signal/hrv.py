@@ -75,14 +75,19 @@ def time_domain(rr: np.ndarray) -> dict[str, float]:
     )
 
 
-def frequency_domain(ts_ms: np.ndarray, rr: np.ndarray, min_duration_s: float = 120.0) -> dict[str, float]:
-    """Lomb-Scargle band powers (ms^2). Needs >= ~2 min for LF to mean anything."""
+HF_MIN_S = 60.0    # HF needs >= 1 min of clean data
+LF_MIN_S = 150.0   # LF needs >= 2.5 min (Task Force 1996; Shaffer & Ginsberg 2017)
+
+
+def frequency_domain(ts_ms: np.ndarray, rr: np.ndarray) -> dict[str, float]:
+    """Lomb-Scargle band powers (ms^2). HF (and the RSA respiration estimate) from >= 1 min of
+    data; LF and LF/HF only from >= 2.5 min — otherwise NaN, never a guess."""
     nan = dict(lf=math.nan, hf=math.nan, lf_hf=math.nan, hf_peak_hz=math.nan, resp_rate_rsa=math.nan)
     rr = np.asarray(rr, dtype=np.float64)
     if rr.size < 30:
         return nan
     t = (np.asarray(ts_ms, dtype=np.float64) - ts_ms[0]) / 1000.0
-    if t[-1] < min_duration_s:
+    if t[-1] < HF_MIN_S:
         return nan
     y = rr - rr.mean()
     f = np.linspace(VLF[0], HF[1], 800)
@@ -97,13 +102,14 @@ def frequency_domain(ts_ms: np.ndarray, rr: np.ndarray, min_duration_s: float = 
         m = (f >= lo) & (f < hi)
         return float(np.sum(psd[m]) * df)
 
-    lf, hf = band(*LF), band(*HF)
+    hf = band(*HF)
+    lf = band(*LF) if t[-1] >= LF_MIN_S else math.nan
     hm = (f >= HF[0]) & (f < HF[1])
     hf_peak = float(f[hm][np.argmax(psd[hm])]) if np.any(hm) else math.nan
     return dict(
         lf=lf,
         hf=hf,
-        lf_hf=lf / hf if hf > 0 else math.nan,
+        lf_hf=lf / hf if hf > 0 and not math.isnan(lf) else math.nan,
         hf_peak_hz=hf_peak,
         resp_rate_rsa=hf_peak * 60.0 if not math.isnan(hf_peak) else math.nan,
     )

@@ -124,3 +124,10 @@ def test_matches_neurokit2_rmssd_if_available():
     peaks = np.concatenate([[0], np.cumsum(rr)]).astype(int)  # ms at 1000 Hz
     ref = nk.hrv_time(peaks, sampling_rate=1000)["HRV_RMSSD"].iloc[0]
     assert hrv.time_domain(rr)["rmssd"] == pytest.approx(ref, rel=0.02)
+
+
+def test_lf_needs_two_and_a_half_minutes():
+    ts, rr = rr_series(n=120, hf_amp=30, lf_amp=30, noise_sd=2, seed=11)  # ~108 s
+    fd = hrv.frequency_domain(ts, rr)
+    assert math.isnan(fd["lf"]) and math.isnan(fd["lf_hf"])
+    assert fd["hf"] > 0 and fd["resp_rate_rsa"] == pytest.approx(15, abs=1.5)

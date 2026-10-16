@@ -20,13 +20,18 @@ import numpy as np
 
 from pulso import metrics as M
 from pulso import store
-from pulso.models import additional_hr, baseline, episodes, fusion
+from pulso.models import additional_hr, baseline, episodes, fusion, nonmetabolic_hrv
 from pulso.signal import hrv
 from pulso.signal.rr import clean_rr
 from pulso.signal.series import MIN, bin_mean, grid, mad
 
 DAY = 24 * 60 * MIN
 FIT_DAYS = 14
+# Wrist PPI is only a fair HRV surrogate when still (Bent 2020; Georgiou 2018): windows whose mean
+# ENMO exceeds this (sedentary/light-walking cut, Bakrania 2016) are not used as a stress signal.
+STILL_ENMO_MG = 45.0
+STILL_STEPS_PM = 5.0
+ENMO_WIN = "enmo_win"
 
 
 def local_day_bounds(day: date, tz: str) -> tuple[int, int]:
@@ -102,16 +107,23 @@ def sleep_mask(conn: sqlite3.Connection, bins: np.ndarray) -> np.ndarray:
 
 def hrv_minutes(conn: sqlite3.Connection, start_ms: int, end_ms: int, window_s: float = 120.0) -> dict[str, np.ndarray]:
     """Clean all RR in range and compute 2-min windows stepped every minute, keyed to the
-    minute grid by window end."""
+    minute grid by window end. Also returns the mean ENMO of each window (NaN when no
+    accelerometer data covers it) so callers can keep only still windows."""
     bins = grid(start_ms, end_ms)
-    out = {k: np.full(bins.size, np.nan) for k in (M.RMSSD, M.LN_RMSSD, M.SDNN, M.DFA_A1, M.RESP_RSA, M.HR_RR, M.RR_QUALITY)}
+    keys = (M.RMSSD, M.LN_RMSSD, M.SDNN, M.DFA_A1, M.RESP_RSA, M.HR_RR, M.RR_QUALITY, ENMO_WIN)
+    out = {k: np.full(bins.size, np.nan) for k in keys}
     ts, rr = store.rr(conn, start_ms - int(window_s * 1000), end_ms)
     if rr.size < 50:
         return out
+    e_ts, e_v = store.series(conn, M.ENMO, start_ms - int(window_s * 1000), end_ms)
     clean = clean_rr(ts, rr)
     for w in hrv.rolling(clean, window_s=window_s, step_s=60.0, min_coverage=0.75, min_quality=0.85):
         i = (w.t_end_ms - bins[0]) // MIN - 1
         if 0 <= i < bins.size:
+            if e_ts.size:
+                m = (e_ts >= w.t_start_ms) & (e_ts < w.t_end_ms)
+                if m.sum() >= 0.5 * window_s:
+                    out[ENMO_WIN][i] = float(np.mean(e_v[m]))
             out[M.RMSSD][i] = w.rmssd
             out[M.LN_RMSSD][i] = w.ln_rmssd
             out[M.SDNN][i] = w.sdnn
@@ -216,10 +228,32 @@ def analyze_day(conn: sqlite3.Connection, day: date, tz: str, write: bool = True
 
     # --- our own HRV channel -------------------------------------------------------------
     hv = hrv_minutes(conn, start, end)
-    hist = hrv_minutes(conn, fit_start, start) if np.any(np.isfinite(hv[M.LN_RMSSD])) else None
-    ref_ln = hist[M.LN_RMSSD] if hist is not None and np.sum(np.isfinite(hist[M.LN_RMSSD])) >= 30 else hv[M.LN_RMSSD]
-    hrv_z = -_robust_z(hv[M.LN_RMSSD], ref_ln)
-    hrv_z = np.where(asleep_all[day_sl], np.nan, hrv_z)
+    hrv_z = np.full(ts.size, np.nan)
+    if np.any(np.isfinite(hv[M.LN_RMSSD])):
+        hist = hrv_minutes(conn, fit_start, start)
+
+        def still(h: dict, steps: np.ndarray) -> np.ndarray:
+            e = h[ENMO_WIN]
+            by_accel = np.isfinite(e) & (e < STILL_ENMO_MG)
+            by_steps = ~np.isfinite(e) & ~(np.nan_to_num(steps, nan=0.0) > STILL_STEPS_PM)
+            return np.isfinite(h[M.LN_RMSSD]) & (by_accel | by_steps)
+
+        hours_day = hours_all[day_sl]
+        hours_hist = hours_all[: day_sl.start]
+        st_day = still(hv, steps_all[day_sl])
+        st_hist = still(hist, steps_all[: day_sl.start])
+        model_nm = nonmetabolic_hrv.fit(np.where(st_hist, hist[M.LN_RMSSD], np.nan), hist[ENMO_WIN], hours_hist)
+        if model_nm is not None:
+            hrv_z = model_nm.z(hv[M.LN_RMSSD], hv[ENMO_WIN], hours_day)
+            notes.append(f"non-metabolic HRV model fitted on {model_nm.n_fit} still historical windows")
+        else:
+            ref = np.where(st_hist, hist[M.LN_RMSSD], np.nan)
+            ref = ref if np.sum(np.isfinite(ref)) >= 30 else np.where(st_day, hv[M.LN_RMSSD], np.nan)
+            hrv_z = -_robust_z(hv[M.LN_RMSSD], ref)
+        n_moving = int(np.sum(np.isfinite(hv[M.LN_RMSSD]) & ~st_day))
+        if n_moving:
+            notes.append(f"{n_moving} RR windows dropped from the stress signal (moving)")
+        hrv_z = np.where(st_day & ~asleep_all[day_sl], hrv_z, np.nan)
 
     channels = [fusion.Channel("additional_hr", add_z), fusion.Channel("garmin_stress", stress_z),
                 fusion.Channel("rr_hrv", hrv_z)]
@@ -258,5 +292,6 @@ def _persist(conn: sqlite3.Connection, a: DayAnalysis) -> None:
         store.upsert_samples(conn, M.AROUSAL_Z, M.DERIVED, rows(a.arousal))
         store.upsert_samples(conn, M.AROUSAL_SD, M.DERIVED, rows(a.arousal_sd))
         for k, v in a.hrv.items():
-            store.upsert_samples(conn, k, M.DERIVED, rows(v))
+            if k != ENMO_WIN:
+                store.upsert_samples(conn, k, M.DERIVED, rows(v))
         store.put_artefact(conn, "analysis:day", a.day, a.summary())

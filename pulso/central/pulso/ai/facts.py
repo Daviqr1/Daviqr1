@@ -156,10 +156,27 @@ def build(conn: sqlite3.Connection, start: date, end: date, tz: str) -> FactBook
         if vc.get("mean_dz") is not None:
             book.add("reuniões", f"reuniões vs. mesmos horários sem reunião ({vc['n']} reuniões): diferença {fmt(vc['mean_dz'], 2)} z, "
                                  f"IC95 {fmt(vc['ci'][0], 2)} a {fmt(vc['ci'][1], 2)}, p = {fmt(vc['p'], 3)}.")
+        bb = summ.get("back_to_back")
+        if bb:
+            book.add("reuniões", f"reuniões coladas na anterior (< 10 min de pausa, n = {bb['n_b2b']}): {fmt(bb['mean_b2b'], 2)} z durante; "
+                                 f"com pausa (n = {bb['n_break']}): {fmt(bb['mean_break'], 2)} z; diferença {fmt(bb['diff'], 2)} z, p = {fmt(bb['p'], 3)}.")
         for row in summ.get("by_speaker", [])[:5]:
             book.add("falante", f"quando {row['label']} fala: {fmt(row['mean_dz'], 2)} z (IC95 {fmt(row['ci_low'], 2)} a {fmt(row['ci_high'], 2)}, n = {row['n']} trechos, defasagem {summ['lag_s']} s).")
         for row in summ.get("by_tag", [])[:8]:
             book.add("tema", f"trechos marcados \"{row['label']}\": {fmt(row['mean_dz'], 2)} z (IC95 {fmt(row['ci_low'], 2)} a {fmt(row['ci_high'], 2)}, n = {row['n']}).")
+
+    # validation against your own labels: how many "estresse" marks fall inside a detected episode
+    marks = [e for e in store.events(conn, a, b, kinds=["note"]) if "estress" in (e.title or "").lower()]
+    if marks:
+        eps = []
+        d = start
+        while d <= end:
+            day = store.get_artefact(conn, "analysis:day", d.isoformat())
+            if day:
+                eps += day.get("episodes", [])
+            d += timedelta(days=1)
+        hit = sum(1 for mk in marks if any(e["start_ms"] - 10 * 60_000 <= mk.start_ms <= e["end_ms"] + 10 * 60_000 for e in eps))
+        book.add("validação", f"{hit} de {len(marks)} marcações de estresse feitas no relógio caíram dentro (±10 min) de episódios detectados.")
 
     commits = conn.execute(
         "SELECT start_ms FROM events WHERE kind = 'commit' AND start_ms >= ? AND start_ms < ?", (a, b)

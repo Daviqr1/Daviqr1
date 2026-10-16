@@ -199,3 +199,19 @@ def test_segment_effects_and_lag():
     top = eff["speaker"][0]
     assert top["label"] == "Bruno" and top["ci_low"] > 0.3
     assert eff["tags"][0]["label"] == "prazo"
+
+
+def test_nonmetabolic_hrv_explains_movement():
+    from pulso.models import nonmetabolic_hrv
+
+    rng = np.random.default_rng(9)
+    n = 400
+    enmo = rng.uniform(0, 40, n)
+    hours = rng.uniform(8, 20, n)
+    ln = 3.8 - 0.25 * np.log1p(enmo) + rng.normal(0, 0.05, n)
+    m = nonmetabolic_hrv.fit(ln, enmo, hours)
+    assert m is not None and m.beta[1] == pytest.approx(-0.25, abs=0.05)
+    # same movement, RMSSD 0.3 lower than expected -> clearly positive (aroused) z
+    z = m.z(np.array([3.8 - 0.25 * np.log1p(10) - 0.3]), np.array([10.0]), np.array([14.0]))
+    assert z[0] > 3
+    assert nonmetabolic_hrv.fit(ln[:10], enmo[:10], hours[:10]) is None

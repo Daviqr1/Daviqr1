@@ -35,6 +35,7 @@ class MeetingResponse:
     auc: float              # Σ max(z − baseline, 0) · minutes, during
     recovery_min: float     # minutes after end until back within baseline + 0.25 (NaN if never in 60 min)
     coverage: float         # fraction of the meeting with data
+    level: float = math.nan  # mean z during, NOT baseline-corrected (z is already relative to your norm)
 
     def as_dict(self) -> dict:
         return {k: (None if isinstance(v, float) and math.isnan(v) else v) for k, v in asdict(self).items()}
@@ -64,6 +65,7 @@ def response(ts: np.ndarray, z: np.ndarray, event_id: str, start_ms: int, end_ms
         peak=float(np.nanmax(dur)) - base if np.any(np.isfinite(dur)) else math.nan,
         auc=float(np.nansum(np.maximum(dur - base, 0))) if dur.size else math.nan,
         recovery_min=rec, coverage=cov,
+        level=float(np.nanmean(dur)) if np.any(np.isfinite(dur)) else math.nan,
     )
 
 

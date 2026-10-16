@@ -115,3 +115,16 @@ def test_training_load_and_dfa_thresholds():
     th = training.dfa_thresholds(hrs, a1)
     assert th.hr_at_075 == pytest.approx(120 + (1.1 - 0.75) / (0.7 / 55), abs=0.5)
     assert th.hr_at_050 > th.hr_at_075
+
+
+def test_moving_rr_windows_do_not_feed_stress(conn):
+    first = date(2026, 9, 20)
+    target = date(2026, 10, 5)
+    _fill_days(conn, first, 16, target)
+    a, _ = analysis.local_day_bounds(target, TZ)
+    # accelerometer says the wearer was walking during the first half of the meeting
+    t0 = a + 14 * 60 * MIN
+    rows = [(t0 + k * 1000, 150.0) for k in range(20 * 60)]
+    store.insert_samples(conn, M.ENMO, M.SRC_CIQ_CAPTURE, rows)
+    res = analysis.analyze_day(conn, target, TZ, write=False)
+    assert any("moving" in n for n in res.notes)

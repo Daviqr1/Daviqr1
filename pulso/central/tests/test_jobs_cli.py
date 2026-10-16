@@ -53,3 +53,30 @@ def test_cli_end_to_end(tmp_path, capsys):
     out = capsys.readouterr().out
     assert '"day": "2026-10-16"' in out
     assert cli.main(["--db", db, "inventory"]) == 0
+
+
+def test_back_to_back_meetings_and_mark_validation():
+    from pulso.ai import facts as F
+
+    conn = store.connect(":memory:")
+    d = date(2026, 10, 7)
+    a, b = analysis.local_day_bounds(d, TZ)
+    z = np.zeros((b - a) // MIN)
+    slots = [(9 * 60, 30, False), (9 * 60 + 35, 30, True), (10 * 60 + 10, 30, True), (10 * 60 + 45, 30, True),
+             (14 * 60, 30, False), (16 * 60, 30, False), (17 * 60, 30, False), (8 * 60, 20, False)]
+    for k, (m0, dur, b2b) in enumerate(slots):
+        z[m0 : m0 + dur] = 1.5 if b2b else 0.3
+        store.upsert_event(conn, Event(f"m{k}", "meeting", a + m0 * MIN, a + (m0 + dur) * MIN, f"reunião {k}", "t", {}))
+    store.upsert_samples(conn, M.AROUSAL_Z, M.DERIVED, [(a + i * MIN, float(v)) for i, v in enumerate(z)])
+    store.upsert_event(conn, Event("mark1", "note", a + (9 * 60 + 40) * MIN, a + (9 * 60 + 40) * MIN, "estresse", "watch:cap", {}))
+    store.put_artefact(conn, "analysis:day", d.isoformat(), {
+        "day": d.isoformat(), "arousal_mean_awake": 0.2, "arousal_minutes_above_1_5": 0,
+        "episodes": [{"start_ms": a + 9 * 60 * MIN, "end_ms": a + (10 * 60 + 40) * MIN, "peak_ms": a + 9 * 60 * MIN,
+                      "peak_z": 1.5, "mean_z": 1.5, "auc_z_min": 90, "movement": 0, "kind": "mental", "overlaps": []}]})
+    s = jobs.meeting_job(conn, d, d, TZ)
+    bb = s["back_to_back"]
+    # 09:35, 10:10 and 10:45 follow another meeting after 5 min; 09:00 follows the 08:00 one after 40 min
+    assert bb["n_b2b"] == 3 and bb["n_break"] == 5
+    assert bb["diff"] > 0.8
+    book = F.build(conn, d, d, TZ)
+    assert any("1 de 1 marcações" in f.text for f in book.facts)
