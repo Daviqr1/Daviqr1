@@ -90,3 +90,23 @@ def test_face_endpoint(client_and_token):
     c, tok, _ = client_and_token
     r = c.get("/v1/face", headers={"Authorization": f"Bearer {tok}"})
     assert r.status_code == 200 and "t" in r.json()
+
+
+def test_painel_endpoints():
+    from datetime import date
+
+    from test_analysis import TZ, _fill_days
+
+    conn = store.connect(":memory:")
+    _fill_days(conn, date(2026, 9, 20), 16, date(2026, 10, 5))
+    tok = auth.create_token(conn, "web")
+    c = TestClient(create_app(config.Settings(tz=TZ), conn=conn))
+    page = c.get("/painel")
+    assert page.status_code == 200 and "Pulso" in page.text and tok not in page.text
+    assert c.get("/v1/painel/dia?data=2026-10-05").status_code == 401
+    h = {"Authorization": f"Bearer {tok}"}
+    d = c.get("/v1/painel/dia?data=2026-10-05", headers=h).json()
+    assert d["n"] == 1440 and len(d["arousal"]) == 1440
+    assert any(e["kind"] == "meeting" for e in d["events"]) and d["episodes"]
+    t = c.get("/v1/painel/tabela?dias=3", headers=h).json()
+    assert len(t["rows"]) == 3

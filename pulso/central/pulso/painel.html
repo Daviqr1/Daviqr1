@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pulso — painel</title>
+<style>
+  :root {
+    --bg: #f6f5f2; --card: #ffffff; --ink: #1d1d1f; --muted: #6b6b70; --line: #e4e2dc;
+    --calm: #2f7d5b; --tense: #c2410c; --band: rgba(194, 65, 12, .14); --accent: #2563eb;
+    --mental: rgba(194, 65, 12, .22); --physical: rgba(37, 99, 235, .18); --mixed: rgba(124, 58, 237, .18);
+    --meet: #7c3aed; --commit: #0f766e; --note: #b45309;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #111214; --card: #1a1b1e; --ink: #ececee; --muted: #9a9aa2; --line: #2b2c31;
+      --calm: #4ade80; --tense: #fb923c; --band: rgba(251, 146, 60, .18); --accent: #60a5fa;
+      --mental: rgba(251, 146, 60, .25); --physical: rgba(96, 165, 250, .2); --mixed: rgba(167, 139, 250, .22);
+      --meet: #a78bfa; --commit: #2dd4bf; --note: #fbbf24;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between;
+           padding: 16px; max-width: 1100px; margin: 0 auto; }
+  h1 { font-size: 20px; margin: 0; letter-spacing: .2px; }
+  h2 { font-size: 15px; margin: 0 0 8px; color: var(--muted); font-weight: 600; }
+  main { max-width: 1100px; margin: 0 auto; padding: 0 16px 40px; display: grid; gap: 14px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px; overflow: hidden; }
+  .row { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; }
+  .nav { display: flex; gap: 6px; align-items: center; }
+  button, input { font: inherit; color: inherit; background: var(--card); border: 1px solid var(--line);
+                  border-radius: 7px; padding: 6px 10px; }
+  button { cursor: pointer; }
+  svg { width: 100%; display: block; overflow: visible; }
+  .kpis { display: flex; flex-wrap: wrap; gap: 18px; }
+  .kpi b { display: block; font-size: 22px; font-variant-numeric: tabular-nums; }
+  .kpi span { color: var(--muted); font-size: 13px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 12px; color: var(--muted); font-size: 12px; margin-top: 6px; }
+  .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; font-variant-numeric: tabular-nums; }
+  th, td { padding: 5px 6px; text-align: right; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; }
+  .scroll { overflow-x: auto; }
+  .muted { color: var(--muted); }
+  #login { display: none; }
+  .notes { color: var(--muted); font-size: 12px; margin-top: 6px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Pulso</h1>
+  <div class="nav">
+    <button id="prev" aria-label="dia anterior">‹</button>
+    <input id="day" type="date">
+    <button id="next" aria-label="próximo dia">›</button>
+  </div>
+</header>
+<main>
+  <section class="card" id="login">
+    <h2>Token do aparelho</h2>
+    <p class="muted">Cole um token gerado com <code>pulso token create</code>. Ele fica só neste navegador.</p>
+    <input id="tok" type="password" style="width:100%" placeholder="pulso_dev_...">
+    <p><button id="save">Entrar</button></p>
+  </section>
+
+  <section class="card">
+    <h2>Ativação ao longo do dia <span class="muted">(z: desvios do seu normal; faixa = ±1σ)</span></h2>
+    <div class="kpis" id="kpis"></div>
+    <svg id="main" data-h="300" height="300" role="img" aria-label="ativação"></svg>
+    <div class="legend">
+      <span><i class="sw" style="background:var(--mental)"></i>episódio mental</span>
+      <span><i class="sw" style="background:var(--physical)"></i>físico</span>
+      <span><i class="sw" style="background:var(--mixed)"></i>misto</span>
+      <span><i class="sw" style="background:var(--meet)"></i>reunião/agenda</span>
+      <span><i class="sw" style="background:var(--commit)"></i>commit</span>
+      <span><i class="sw" style="background:var(--note)"></i>marcação</span>
+    </div>
+    <div class="notes" id="notes"></div>
+  </section>
+
+  <section class="row">
+    <div class="card"><h2>FC (bpm)</h2><svg id="hr" data-h="160" height="160"></svg></div>
+    <div class="card"><h2>FC adicional (bpm acima do movimento)</h2><svg id="add" data-h="160" height="160"></svg></div>
+    <div class="card"><h2>Estresse Garmin (0–100)</h2><svg id="stress" data-h="160" height="160"></svg></div>
+    <div class="card"><h2>Passos por minuto</h2><svg id="steps" data-h="160" height="160"></svg></div>
+  </section>
+
+  <section class="row">
+    <div class="card"><h2>Noite</h2><div id="night" class="kpis"></div></div>
+    <div class="card"><h2>RMSSD dos seus RR (ms)</h2><svg id="rmssd" data-h="160" height="160"></svg></div>
+  </section>
+
+  <section class="card">
+    <h2>Últimos 30 dias</h2>
+    <div class="scroll"><table id="tbl"></table></div>
+  </section>
+</main>
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+  const NS = "http://www.w3.org/2000/svg";
+  let token = null;
+  try { token = localStorage.getItem("pulso_token"); } catch (e) {}
+
+  const fmt = (x, d = 1) => x == null ? "—" : Number(x).toLocaleString("pt-BR", { maximumFractionDigits: d, minimumFractionDigits: d });
+  const today = () => { const d = new Date(); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); return d.toISOString().slice(0, 10); };
+
+  async function api(path) {
+    const r = await fetch(path, { headers: { Authorization: "Bearer " + token } });
+    if (r.status === 401) { showLogin(); throw new Error("401"); }
+    return r.json();
+  }
+  function showLogin() { $("login").style.display = "block"; }
+
+  function el(tag, attrs, parent) {
+    const e = document.createElementNS(NS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    if (parent) parent.appendChild(e);
+    return e;
+  }
+
+  function size(svg) {
+    const W = Math.max(200, Math.round(svg.clientWidth || svg.parentNode.clientWidth || 1000));
+    const H = +svg.dataset.h;
+    svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+    return [W, H];
+  }
+
+  function hourGrid(svg, W, H, n) {
+    const step = W < 500 ? 6 : 3;
+    for (let h = 0; h <= 24; h += step) {
+      const x = (h * 60 / n) * W;
+      el("line", { x1: x, x2: x, y1: 0, y2: H, stroke: css("--line"), "stroke-width": 1, "vector-effect": "non-scaling-stroke" }, svg);
+      if (h < 24) { const t = el("text", { x: x + 4, y: H - 4, fill: css("--muted"), "font-size": 11 }, svg); t.textContent = String(h).padStart(2, "0") + "h"; }
+    }
+  }
+
+  function path(vals, x, y, maxGap = 6) {
+    let d = "", last = -1e9;
+    vals.forEach((v, i) => {
+      if (v == null) return;
+      d += (i - last <= maxGap ? "L" : "M") + x(i).toFixed(1) + " " + y(v).toFixed(1);
+      last = i;
+    });
+    return d;
+  }
+
+  function lineChart(svg, vals, color, opts = {}) {
+    svg.innerHTML = "";
+    const [W, H] = size(svg), n = vals.length || 1440;
+    hourGrid(svg, W, H, n);
+    const nums = vals.filter((v) => v != null);
+    if (!nums.length) { const t = el("text", { x: 12, y: 24, fill: css("--muted"), "font-size": 13 }, svg); t.textContent = "sem dados"; return; }
+    let lo = opts.lo ?? Math.min(...nums), hi = opts.hi ?? Math.max(...nums);
+    if (hi - lo < 1e-6) { hi = lo + 1; }
+    const x = (i) => (i / n) * W, y = (v) => H - 14 - ((v - lo) / (hi - lo)) * (H - 24);
+    if (opts.bars) {
+      vals.forEach((v, i) => { if (v) el("rect", { x: x(i), y: y(v), width: Math.max(1, W / n), height: H - 14 - y(v), fill: color }, svg); });
+    } else {
+      el("path", { d: path(vals, x, y), fill: "none", stroke: color, "stroke-width": 1.6, "vector-effect": "non-scaling-stroke" }, svg);
+    }
+    const t = el("text", { x: W - 6, y: 14, fill: css("--muted"), "font-size": 11, "text-anchor": "end" }, svg);
+    t.textContent = fmt(lo, 0) + "–" + fmt(hi, 0);
+  }
+
+  function mainChart(d) {
+    const svg = $("main"); svg.innerHTML = "";
+    const [W, H] = size(svg), n = d.n, top = 10, bottom = 250;
+    hourGrid(svg, W, H, n);
+    const x = (i) => (i / n) * W;
+    const zs = d.arousal.filter((v) => v != null);
+    const lo = Math.min(-2, ...zs), hi = Math.max(3, ...zs);
+    const y = (v) => bottom - ((v - lo) / (hi - lo)) * (bottom - top);
+    const kindColor = { mental: css("--mental"), physical: css("--physical"), mixed: css("--mixed") };
+    d.episodes.forEach((e) => {
+      const r = el("rect", { x: x(e.start), y: top, width: Math.max(2, x(e.end) - x(e.start)), height: bottom - top, fill: kindColor[e.kind] || css("--mental") }, svg);
+      el("title", {}, r).textContent = `${e.kind} ${e.label} pico ${fmt(e.peak_z)} z`;
+    });
+    // ±1σ band
+    let band = "", pts = [];
+    d.arousal.forEach((v, i) => { const s = d.arousal_sd[i]; if (v != null && s != null) pts.push([i, v + s, v - s]); });
+    if (pts.length) {
+      band = "M" + pts.map((p) => x(p[0]).toFixed(1) + " " + y(p[1]).toFixed(1)).join("L")
+        + "L" + pts.reverse().map((p) => x(p[0]).toFixed(1) + " " + y(p[2]).toFixed(1)).join("L") + "Z";
+      el("path", { d: band, fill: css("--band"), stroke: "none" }, svg);
+    }
+    el("line", { x1: 0, x2: W, y1: y(0), y2: y(0), stroke: css("--muted"), "stroke-dasharray": "4 4", "vector-effect": "non-scaling-stroke" }, svg);
+    el("line", { x1: 0, x2: W, y1: y(1.5), y2: y(1.5), stroke: css("--tense"), "stroke-dasharray": "2 6", "vector-effect": "non-scaling-stroke" }, svg);
+    el("path", { d: path(d.arousal, x, y), fill: "none", stroke: css("--tense"), "stroke-width": 2, "vector-effect": "non-scaling-stroke" }, svg);
+    // event lanes
+    const lane = { meeting: 258, calendar: 258, workout: 258, session: 258, commit: 274, note: 286 };
+    const col = { meeting: css("--meet"), calendar: css("--meet"), workout: css("--accent"), session: css("--accent"), commit: css("--commit"), note: css("--note") };
+    d.events.forEach((e) => {
+      const w = Math.max(3, x(e.end) - x(e.start));
+      const r = el("rect", { x: x(e.start), y: lane[e.kind] ?? 258, width: e.kind === "meeting" || e.kind === "calendar" || e.kind === "workout" ? w : 3, height: 9, rx: 2, fill: col[e.kind] || css("--muted") }, svg);
+      el("title", {}, r).textContent = `${e.at} ${e.title}`;
+    });
+  }
+
+  function kpis(d) {
+    const z = d.arousal.filter((v) => v != null);
+    const mean = z.length ? z.reduce((a, b) => a + b, 0) / z.length : null;
+    const above = z.filter((v) => v > 1.5).length;
+    const items = [
+      [fmt(mean, 2) + " z", "ativação média"], [String(above), "min acima de 1,5 z"],
+      [String(d.episodes.length), "episódios"], [String(d.events.filter((e) => e.kind === "meeting" || e.kind === "calendar").length), "reuniões/agenda"],
+    ];
+    $("kpis").innerHTML = items.map(([v, l]) => `<div class="kpi"><b>${v}</b><span>${l}</span></div>`).join("");
+    $("notes").textContent = (d.notes || []).join(" · ");
+    const n = d.night;
+    $("night").innerHTML = n ? [
+      [fmt(n.total_sleep_min / 60, 1) + " h", "sono"], [fmt((n.efficiency || 0) * 100, 0) + " %", "eficiência"],
+      [fmt(n.deep_min, 0) + " / " + fmt(n.rem_min, 0), "profundo / REM (min)"], [fmt(n.hr_nadir, 0) + " bpm", "FC mínima"],
+      [fmt((n.hr_nadir_at_frac || 0) * 100, 0) + " %", "momento do mínimo na noite"], [fmt(n.hrv_ms, 0) + " ms", "HRV (" + (n.hrv_status || "—") + ")"],
+      [fmt(n.debt_min, 0) + " min", "débito 14 dias"],
+    ].map(([v, l]) => `<div class="kpi"><b>${v}</b><span>${l}</span></div>`).join("") : '<span class="muted">sem noite registrada</span>';
+  }
+
+  function table(rows) {
+    const cols = [["day", "dia"], ["arousal_mean", "ativação"], ["episodes", "episódios"], ["sleep_h", "sono h"],
+      ["hrv_ms", "HRV ms"], ["meetings", "reuniões"], ["meeting_minutes", "min reunião"], ["commits", "commits"], ["late_commits", "22h–5h"], ["marks", "marcações"]];
+    const z = rows.map((r) => r.arousal_mean).filter((v) => v != null);
+    const zmax = Math.max(1, ...z.map(Math.abs));
+    const tense = css("--tense"), calm = css("--calm");
+    let h = "<tr>" + cols.map((c) => `<th>${c[1]}</th>`).join("") + "</tr>";
+    rows.slice().reverse().forEach((r) => {
+      h += "<tr>" + cols.map(([k]) => {
+        let v = r[k];
+        if (k === "arousal_mean" && v != null) {
+          const a = Math.min(1, Math.abs(v) / zmax) * 0.35;
+          const c = v > 0 ? tense : calm;
+          return `<td style="background:color-mix(in srgb, ${c} ${Math.round(a * 100)}%, transparent)">${fmt(v, 2)}</td>`;
+        }
+        return `<td>${v == null ? "—" : typeof v === "number" ? fmt(v, Number.isInteger(v) ? 0 : 1) : v}</td>`;
+      }).join("") + "</tr>";
+    });
+    $("tbl").innerHTML = h;
+  }
+
+  let last = null;
+  function draw(d) {
+    mainChart(d); kpis(d);
+    lineChart($("hr"), d.hr, css("--tense"));
+    lineChart($("add"), d.additional_hr, css("--tense"));
+    lineChart($("stress"), d.stress, css("--note"), { lo: 0, hi: 100 });
+    lineChart($("steps"), d.steps, css("--accent"), { bars: true, lo: 0 });
+    lineChart($("rmssd"), d.rmssd, css("--calm"));
+  }
+  window.addEventListener("resize", () => { if (last) draw(last); });
+
+  async function load(day) {
+    if (!token) { showLogin(); return; }
+    try { localStorage.setItem("pulso_day", day); } catch (e) {}
+    last = await api("/v1/painel/dia?data=" + day);
+    draw(last);
+  }
+
+  $("save").onclick = () => {
+    token = $("tok").value.trim();
+    try { localStorage.setItem("pulso_token", token); } catch (e) {}
+    $("login").style.display = "none";
+    init();
+  };
+  const shift = (k) => { const d = new Date($("day").value + "T12:00:00"); d.setDate(d.getDate() + k); $("day").value = d.toISOString().slice(0, 10); load($("day").value); };
+  $("prev").onclick = () => shift(-1);
+  $("next").onclick = () => shift(1);
+  $("day").onchange = () => load($("day").value);
+
+  async function init() {
+    let day = today();
+    try { day = localStorage.getItem("pulso_day") || day; } catch (e) {}
+    $("day").value = day;
+    await load(day);
+    if (token) table((await api("/v1/painel/tabela?dias=30")).rows);
+  }
+  init();
+})();
+</script>
+</body>
+</html>

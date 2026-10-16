@@ -35,6 +35,7 @@ packages = ["pulso"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "pulso/store/schema.sql" = "pulso/store/schema.sql"
+"pulso/painel.html" = "pulso/painel.html"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

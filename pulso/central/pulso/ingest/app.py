@@ -14,7 +14,7 @@ from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 
 from pulso import analysis, config, store
 from pulso.face import face_state
@@ -67,6 +67,29 @@ def create_app(settings: config.Settings | None = None, conn: sqlite3.Connection
         with lock:
             _maybe_reanalyze(now)
             return face_state(db, now, settings.tz)
+
+    @app.get("/painel", response_class=HTMLResponse)
+    def painel() -> str:
+        from pulso import web
+
+        return web.html()  # the page carries no data; it fetches with the bearer token
+
+    @app.get("/v1/painel/dia")
+    def painel_dia(data: str | None = None, label: str = Depends(device)) -> dict:
+        from pulso import web
+
+        d = date.fromisoformat(data) if data else datetime.now(ZoneInfo(settings.tz)).date()
+        with lock:
+            if store.get_artefact(db, "analysis:day", d.isoformat()) is None:
+                analysis.analyze_day(db, d, settings.tz)
+            return web.day_payload(db, d, settings.tz)
+
+    @app.get("/v1/painel/tabela")
+    def painel_tabela(dias: int = 30, label: str = Depends(device)) -> dict:
+        from pulso import web
+
+        with lock:
+            return web.table_payload(db, max(1, min(dias, 366)), settings.tz)
 
     def _maybe_reanalyze(now: int) -> None:
         """Keep today's derived series fresh enough for the face without recomputing per request."""

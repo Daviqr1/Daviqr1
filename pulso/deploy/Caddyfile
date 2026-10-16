@@ -7,6 +7,10 @@
 	handle /health {
 		reverse_proxy api:8080
 	}
+	# painel web (a página não tem dados; busca com o token do aparelho)
+	handle /painel {
+		reverse_proxy api:8080
+	}
 	# MCP (Bearer PULSO_MCP_TOKEN verificado pelo próprio servidor)
 	handle /mcp* {
 		reverse_proxy mcp:8765
