@@ -30,7 +30,7 @@ def _print(obj) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="pulso", description="Central de saúde e performance (Garmin FR255).")
-    p.add_argument("--db", help="caminho do SQLite (default: $PULSO_DB ou data/pulso.sqlite)")
+    p.add_argument("--db", help="caminho do SQLite (default: $PULSO_DB ou ~/.pulso/pulso.sqlite)")
     p.add_argument("--tz", help="fuso (default: $PULSO_TZ ou America/Sao_Paulo)")
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -98,6 +98,18 @@ def main(argv: list[str] | None = None) -> int:
     for b in (bw, bh):
         b.add_argument("--central", help="URL da central (senão grava direto no banco local)")
         b.add_argument("--token", help="token de aparelho para a central")
+
+    nb = sub.add_parser("notebook", help="tudo no notebook: ingestão + painel + jobs (+ ponte BLE, + túnel)")
+    nb.add_argument("--port", type=int, default=8080)
+    nb.add_argument("--host", default="127.0.0.1")
+    nb.add_argument("--ble", action="store_true", help="liga a ponte BLE (relógio direto, pacotes grandes)")
+    nb.add_argument("--tunnel", choices=["tailscale", "cloudflared"], help="abre HTTPS público para o celular")
+    nb.add_argument("--no-jobs", action="store_true")
+
+    ex = sub.add_parser("export", help="resumo de saúde para NotebookLM/Gemini (Markdown local e/ou Google Doc)")
+    ex.add_argument("--days", type=int, default=14)
+    ex.add_argument("--drive", action="store_true", help="publica/atualiza o Google Doc (ver docs/notebooklm.md)")
+    ex.add_argument("--com-nomes", action="store_true", help="mantém nomes de colegas (padrão: pseudônimos)")
 
     dm = sub.add_parser("daemon", help="jobs periódicos: reanálise, Garmin Connect, relatórios")
     dm.add_argument("--once", action="store_true", help="uma passada e sai (útil para testar)")
@@ -217,6 +229,25 @@ def main(argv: list[str] | None = None) -> int:
             on_batch = (lambda b: None) if args.probe else sink
             asyncio.run(stream(args.name, on_batch, device_id=f"hrm-{args.name.lower().replace(' ', '-')}",
                                seconds=secs, src="strap"))
+        return 0
+
+    if args.cmd == "notebook":
+        from pulso import notebook
+
+        notebook.run(config.Settings(db_path=db_path, tz=tz), host=args.host, port=args.port, bridge=args.ble,
+                     tunnel=args.tunnel, jobs=not args.no_jobs)
+        return 0
+
+    if args.cmd == "export":
+        from pulso.export import summary
+
+        md = summary.build(conn, tz, days=args.days, names=args.com_nomes)
+        path = summary.write_local(md, tz)
+        print(f"resumo: {path}")
+        if args.drive:
+            from pulso.export import gdrive
+
+            print(f"Google Doc: {gdrive.publish(md)}")
         return 0
 
     if args.cmd == "daemon":

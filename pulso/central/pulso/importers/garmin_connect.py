@@ -25,6 +25,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from pulso import config
 from pulso import metrics as M
 from pulso import store
 from pulso.store import Event
@@ -171,7 +172,7 @@ def archive_wellness(g, day: str) -> list[Path]:
     import io
     import zipfile
 
-    root = Path(os.environ.get("PULSO_ARCHIVE", "data/fit-archive")) / day
+    root = config.archive_dir() / day
     blob = g.download_health_snapshot(day)  # despite the name: /download-service/files/wellness/{day}
     root.mkdir(parents=True, exist_ok=True)
     (root / "wellness.zip").write_bytes(blob)

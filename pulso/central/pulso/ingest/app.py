@@ -102,6 +102,12 @@ def create_app(settings: config.Settings | None = None, conn: sqlite3.Connection
             analysis.analyze_day(db, today, settings.tz)
         except Exception as e:  # never fail an upload because analysis failed
             store.put_artefact(db, "error:analysis", key, {"error": repr(e), "at": now})
+        try:
+            from pulso import alerts
+
+            alerts.evaluate(db, now, settings.tz)
+        except Exception as e:
+            store.put_artefact(db, "error:alerts", key, {"error": repr(e), "at": now})
 
     app.state.db = db
     app.state.settings = settings

@@ -74,6 +74,23 @@ def loop(settings: config.Settings | None = None, once: bool = False) -> None:
             if today.weekday() == 0:
                 _run(conn, "report:weekly", lambda: report.generate(conn, today - timedelta(days=7), y, settings.tz,
                                                                      kind="weekly", settings=settings).get("headline"))
+        # health summary for NotebookLM/Gemini: every morning after the report (local file always,
+        # Google Doc when PULSO_GDRIVE_DOC_ID or the OAuth client is configured)
+        if now.hour == 7 and now.minute >= 15 and f"export:{stamp}" not in done_today:
+            done_today.add(f"export:{stamp}")
+
+            def _export():
+                from pulso.export import summary
+
+                md = summary.build(conn, settings.tz)
+                path = summary.write_local(md, settings.tz)
+                if os.environ.get("PULSO_GDRIVE_CLIENT") or os.environ.get("PULSO_GDRIVE_TOKEN"):
+                    from pulso.export import gdrive
+
+                    return f"{path} + {gdrive.publish(md)}"
+                return str(path)
+
+            _run(conn, "export:summary", _export)
         if len(done_today) > 50:
             done_today = {k for k in done_today if k.endswith(stamp)}
         if once:

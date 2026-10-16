@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "pulso": {
+      "command": "pulso",
+      "args": ["mcp"],
+      "env": {
+        "PULSO_TZ": "${PULSO_TZ:-America/Sao_Paulo}"
+      }
+    }
+  }
+}

@@ -23,6 +23,7 @@ from datetime import datetime, time, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from pulso import config
 from pulso import metrics as M
 from pulso import store
 from pulso.importers import fit
@@ -121,7 +122,7 @@ def import_export(conn: sqlite3.Connection, path: str | Path, tz: str, archive: 
                   log: Callable[[str], None] = print, batch: int = 200) -> dict:
     """Import a Garmin export zip (or the extracted folder). Returns counts."""
     path = Path(path)
-    archive = Path(archive or os.environ.get("PULSO_ARCHIVE", "data/fit-archive")) / "export"
+    archive = Path(archive or config.archive_dir()) / "export"
     archive.mkdir(parents=True, exist_ok=True)
     counts = {"fit_files": 0, "fit_new": 0, "sleep_nights": 0, "daily_summaries": 0, "errors": 0}
     pending: list[str] = []

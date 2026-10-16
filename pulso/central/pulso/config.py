@@ -7,9 +7,19 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
+def home() -> Path:
+    """Where the central keeps its data when nothing else is configured: ~/.pulso (notebook mode).
+    Docker sets PULSO_DB / PULSO_ARCHIVE explicitly to /data."""
+    return Path(os.environ.get("PULSO_HOME", Path.home() / ".pulso")).expanduser()
+
+
+def archive_dir() -> Path:
+    return Path(os.environ.get("PULSO_ARCHIVE", home() / "fit-archive")).expanduser()
+
+
 @dataclass(frozen=True)
 class Settings:
-    db_path: Path = field(default_factory=lambda: Path(os.environ.get("PULSO_DB", "data/pulso.sqlite")))
+    db_path: Path = field(default_factory=lambda: Path(os.environ.get("PULSO_DB", home() / "pulso.sqlite")).expanduser())
     tz: str = field(default_factory=lambda: os.environ.get("PULSO_TZ", "America/Sao_Paulo"))
     # Claude
     anthropic_api_key: str | None = field(default_factory=lambda: os.environ.get("ANTHROPIC_API_KEY"))

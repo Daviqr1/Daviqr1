@@ -77,5 +77,6 @@ Notas para o Monkey C:
 | `hrv` / `hrvs` | int / str | HRV noturna (ms) / `below` `normal` `above` `insufficient` |
 | `nm` | obj | próxima reunião `{t: "15:00", ti: "Planning", r: 0..3}` (r = carga prevista) |
 | `msg` | str | insight curto do dia (≤ 48 chars) |
+| `al` | obj | alerta novo `{i: id numérico estável, m: texto ≤ 60}` — mostrar uma vez como notificação nativa (`Notifications.showNotification`, API 5.1.0) e lembrar o último `i` mostrado |
 
 `GET /v1/face` devolve o mesmo objeto sem enviar dados.
