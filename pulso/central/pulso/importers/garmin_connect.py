@@ -200,22 +200,42 @@ def store_day(conn: sqlite3.Connection, series: dict[str, list], epochs: list, e
     return n
 
 
-def sync(conn: sqlite3.Connection, days: int = 7, tz: str | None = None, client=None) -> dict:
+COLD_AFTER_DAYS = 170  # Garmin moves intraday data older than ~6 months to cold storage
+
+
+def sync(conn: sqlite3.Connection, days: int = 7, tz: str | None = None, client=None, since: date | None = None,
+         until: date | None = None, pause_s: float = 2.0, resume: bool = True, reload_cold: bool = False,
+         max_reloads: int = 20, log=print) -> dict:
+    """Sync day by day, newest first. Built for backfills: resumable (days already synced are
+    skipped, except the last 2 which may still be filling in), throttled (`pause_s` between days,
+    be gentle with an unofficial endpoint) and aware of cold storage (older intraday data comes
+    back empty; with `reload_cold` a reload is requested — at most `max_reloads` per run — and the
+    day is fetched again on a later run)."""
+    import time as _time
+
     g = client or _client()
-    today = date.today()
+    until = until or date.today()
+    since = since or until - timedelta(days=days - 1)
     report: dict[str, Any] = {}
-    for k in range(days):
-        d = (today - timedelta(days=k)).isoformat()
+    reloads = 0
+    d = until
+    while d >= since:
+        ds = d.isoformat()
+        fresh = (date.today() - d).days < 2  # the last 2 days may still be filling in
+        if resume and not fresh and conn.execute(
+                "SELECT 1 FROM artefacts WHERE kind = 'gc_synced' AND key = ?", (ds,)).fetchone():
+            d -= timedelta(days=1)
+            continue
         series: dict[str, list] = {}
         epochs: list = []
         events: list[Event] = []
         problems = []
         calls = [
-            ("heart_rates", lambda: series.update(parse_heart_rates(g.get_heart_rates(d)))),
-            ("stress", lambda: series.update(parse_stress(g.get_stress_data(d)))),
-            ("respiration", lambda: series.update(parse_respiration(g.get_respiration_data(d)))),
-            ("spo2", lambda: series.update(parse_spo2(g.get_spo2_data(d)))),
-            ("steps", lambda: series.update(parse_steps(g.get_steps_data(d)))),
+            ("heart_rates", lambda: series.update(parse_heart_rates(g.get_heart_rates(ds)))),
+            ("stress", lambda: series.update(parse_stress(g.get_stress_data(ds)))),
+            ("respiration", lambda: series.update(parse_respiration(g.get_respiration_data(ds)))),
+            ("spo2", lambda: series.update(parse_spo2(g.get_spo2_data(ds)))),
+            ("steps", lambda: series.update(parse_steps(g.get_steps_data(ds)))),
         ]
         for name, fn in calls:
             try:
@@ -223,13 +243,13 @@ def sync(conn: sqlite3.Connection, days: int = 7, tz: str | None = None, client=
             except Exception as e:  # shape changes / missing data must not abort the sync
                 problems.append(f"{name}: {e!r}"[:200])
         try:
-            s, ev = parse_hrv(g.get_hrv_data(d))
+            s, ev = parse_hrv(g.get_hrv_data(ds))
             series.update(s)
             events += ev
         except Exception as e:
             problems.append(f"hrv: {e!r}"[:200])
         try:
-            ep, ev = parse_sleep(g.get_sleep_data(d))
+            ep, ev = parse_sleep(g.get_sleep_data(ds))
             epochs += ep
             events += ev
         except Exception as e:
@@ -238,11 +258,30 @@ def sync(conn: sqlite3.Connection, days: int = 7, tz: str | None = None, client=
         try:
             from pulso.importers import fit
 
-            files = archive_wellness(g, d)
+            files = archive_wellness(g, ds)
             if files:
                 stored["fit_files"] = len(files)
                 fit.import_paths(conn, [str(f) for f in files])
         except Exception as e:
             problems.append(f"wellness_fit: {e!r}"[:200])
-        report[d] = {"stored": stored, "problems": problems}
+
+        empty_intraday = not series.get(M.HR) and not series.get(M.STRESS_GARMIN)
+        cold = empty_intraday and (date.today() - d).days > COLD_AFTER_DAYS
+        if cold and reload_cold and reloads < max_reloads:
+            try:
+                g.request_reload(ds)
+                reloads += 1
+                problems.append("armazenamento frio: recarga pedida; rode de novo mais tarde")
+            except Exception as e:
+                problems.append(f"reload: {e!r}"[:200])
+        elif cold:
+            problems.append("armazenamento frio (>6 meses): use o export da conta ou --reload-cold")
+        if not cold:
+            store.put_artefact(conn, "gc_synced", ds, {"stored": stored, "problems": problems})
+        report[ds] = {"stored": stored, "problems": problems}
+        log(f"{ds}: {sum(v for v in stored.values() if isinstance(v, int))} itens"
+            + (f" — {problems[0]}" if problems else ""))
+        d -= timedelta(days=1)
+        if d >= since and pause_s:
+            _time.sleep(pause_s)
     return report

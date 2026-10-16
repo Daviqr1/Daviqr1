@@ -36,7 +36,7 @@ class FakeGarmin:
 
 def test_sync_parses_and_tolerates_breakage():
     conn = store.connect(":memory:")
-    rep = gc.sync(conn, days=1, client=FakeGarmin())
+    rep = gc.sync(conn, days=1, client=FakeGarmin(), pause_s=0, log=lambda m: None)
     day = next(iter(rep.values()))
     assert any("spo2" in p for p in day["problems"])  # broken endpoint reported, not fatal
     assert store.series(conn, M.HR, 0, 2**62)[1].tolist() == [60]
@@ -51,3 +51,39 @@ def test_sync_parses_and_tolerates_breakage():
     assert stages == ["light"] * 3 + ["deep"] * 2
     sl = store.events(conn, 0, 2**62, kinds=["sleep"])[0]
     assert sl.attrs["score"] == 71
+
+
+def test_backfill_is_resumable_and_cold_aware():
+    from datetime import date, timedelta
+
+    calls = []
+
+    class Counting(FakeGarmin):
+        def get_heart_rates(self, d):
+            calls.append(d)
+            if d < (date.today() - timedelta(days=200)).isoformat():
+                return {"heartRateValues": []}  # cold storage looks like an empty day
+            return super().get_heart_rates(d)
+
+        def get_stress_data(self, d):
+            if d < (date.today() - timedelta(days=200)).isoformat():
+                return {}
+            return super().get_stress_data(d)
+
+        def request_reload(self, d):
+            calls.append(("reload", d))
+            return {}
+
+    conn = store.connect(":memory:")
+    until = date.today() - timedelta(days=10)
+    gc.sync(conn, client=Counting(), since=until - timedelta(days=4), until=until, pause_s=0, log=lambda m: None)
+    assert len(calls) == 5
+    calls.clear()
+    gc.sync(conn, client=Counting(), since=until - timedelta(days=4), until=until, pause_s=0, log=lambda m: None)
+    assert calls == []  # everything already synced
+    old = date.today() - timedelta(days=300)
+    rep = gc.sync(conn, client=Counting(), since=old, until=old, pause_s=0, reload_cold=True, log=lambda m: None)
+    assert ("reload", old.isoformat()) in calls
+    assert "frio" in " ".join(rep[old.isoformat()]["problems"])
+    # cold days are not marked as synced, so a later run fetches them again
+    assert conn.execute("SELECT 1 FROM artefacts WHERE kind = 'gc_synced' AND key = ?", (old.isoformat(),)).fetchone() is None

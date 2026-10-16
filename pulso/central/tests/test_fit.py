@@ -102,3 +102,42 @@ def test_activity_with_hrv_logging(tmp_path):
     assert store.series(conn, M.HR, 0, 2**62)[1].size == 10
     ev = store.events(conn, 0, 2**62, kinds=["workout"])
     assert ev and ev[0].title == "running" and ev[0].end_ms - ev[0].start_ms == 10_000
+
+
+def test_garmin_account_export(tmp_path):
+    import io
+    import json
+    import zipfile
+
+    from pulso.importers import garmin_export
+
+    m = [{"mesg_num": NUM["file_id"], "type": "monitoring_b", "manufacturer": "garmin", "time_created": T0},
+         {"mesg_num": NUM["monitoring"], "timestamp": T0, "heart_rate": 58},
+         {"mesg_num": NUM["stress_level"], "stress_level_time": T0, "stress_level_value": 20}]
+    enc = Encoder()
+    for x in m:
+        enc.write_mesg(x)
+    fit_bytes = enc.close()
+    inner = io.BytesIO()
+    with zipfile.ZipFile(inner, "w") as z:
+        z.writestr("123456_WELLNESS.fit", fit_bytes)
+        z.writestr("not_a_fit.fit", b"garbage")
+    outer = io.BytesIO()
+    with zipfile.ZipFile(outer, "w") as z:
+        z.writestr("DI_CONNECT/DI-Connect-Uploaded-Files/UploadedFiles_0-_Part1.zip", inner.getvalue())
+        z.writestr("DI_CONNECT/DI-Connect-Wellness/2026-10-01_2026-11-01_123_sleepData.json", json.dumps([
+            {"calendarDate": "2026-10-15", "sleepStartTimestampGMT": "2026-10-15T02:00:00.0",
+             "sleepEndTimestampGMT": "2026-10-15T09:30:00.0", "deepSleepSeconds": 4000,
+             "sleepScores": {"overallScore": 78}}]))
+        z.writestr("DI_CONNECT/DI-Connect-Aggregator/UDSFile_2026-10-01_2026-11-01.json", json.dumps([
+            {"calendarDate": "2026-10-15", "restingHeartRate": 51}, {"calendarDate": "2026-10-16"}]))
+    conn = store.connect(":memory:")
+    c = garmin_export.import_bytes(conn, outer.getvalue(), "America/Sao_Paulo", archive=tmp_path / "arch")
+    assert c["fit_files"] == 1 and c["fit_new"] == 1 and c["sleep_nights"] == 1 and c["daily_summaries"] == 1
+    assert store.series(conn, M.HR, 0, 2**62)[1].tolist() == [58]
+    assert store.series(conn, M.RESTING_HR, 0, 2**62)[1].tolist() == [51]
+    assert store.events(conn, 0, 2**62, kinds=["sleep"])[0].attrs["score"] == 78
+    assert (tmp_path / "arch" / "export" / "123456_WELLNESS.fit").exists()
+    # re-import is a no-op
+    c2 = garmin_export.import_bytes(conn, outer.getvalue(), "America/Sao_Paulo", archive=tmp_path / "arch")
+    assert c2["fit_new"] == 0

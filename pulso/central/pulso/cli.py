@@ -63,7 +63,13 @@ def main(argv: list[str] | None = None) -> int:
     ifit = isub.add_parser("fit", help="arquivos FIT do relógio (GARMIN/Monitor, Sleep, Activity...)")
     ifit.add_argument("paths", nargs="+")
     igc = isub.add_parser("garmin", help="Garmin Connect (biblioteca não oficial; sua conta)")
-    igc.add_argument("--days", type=int, default=7)
+    igc.add_argument("--days", type=int, default=7, help="quantos dias para trás (backfill: 180)")
+    igc.add_argument("--since", type=_date, help="desde esta data (em vez de --days)")
+    igc.add_argument("--pause", type=float, default=2.0, help="segundos entre dias (seja gentil com a Garmin)")
+    igc.add_argument("--no-resume", action="store_true", help="rebaixa dias já sincronizados")
+    igc.add_argument("--reload-cold", action="store_true", help="pede recarga de dias em armazenamento frio (>6 meses)")
+    iex = isub.add_parser("garmin-export", help="export completo da conta Garmin (.zip ou pasta) — anos de histórico")
+    iex.add_argument("path")
 
     for name, help_ in (("analyze", "recalcula séries derivadas, sono e reuniões"),
                         ("report", "relatório com Claude (números verificados)"),
@@ -151,7 +157,13 @@ def main(argv: list[str] | None = None) -> int:
         elif args.icmd == "garmin":
             from pulso.importers import garmin_connect
 
-            _print(garmin_connect.sync(conn, days=args.days, tz=tz))
+            rep = garmin_connect.sync(conn, days=args.days, tz=tz, since=args.since, pause_s=args.pause,
+                                      resume=not args.no_resume, reload_cold=args.reload_cold)
+            print(f"{len(rep)} dias sincronizados")
+        elif args.icmd == "garmin-export":
+            from pulso.importers import garmin_export
+
+            _print(garmin_export.import_export(conn, args.path, tz))
         return 0
 
     if args.cmd == "analyze":

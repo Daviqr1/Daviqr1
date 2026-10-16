@@ -105,7 +105,8 @@ def sleep_mask(conn: sqlite3.Connection, bins: np.ndarray) -> np.ndarray:
     return m
 
 
-def hrv_minutes(conn: sqlite3.Connection, start_ms: int, end_ms: int, window_s: float = 120.0) -> dict[str, np.ndarray]:
+def hrv_minutes(conn: sqlite3.Connection, start_ms: int, end_ms: int, window_s: float = 120.0,
+                full: bool = True) -> dict[str, np.ndarray]:
     """Clean all RR in range and compute 2-min windows stepped every minute, keyed to the
     minute grid by window end. Also returns the mean ENMO of each window (NaN when no
     accelerometer data covers it) so callers can keep only still windows."""
@@ -117,7 +118,8 @@ def hrv_minutes(conn: sqlite3.Connection, start_ms: int, end_ms: int, window_s: 
         return out
     e_ts, e_v = store.series(conn, M.ENMO, start_ms - int(window_s * 1000), end_ms)
     clean = clean_rr(ts, rr)
-    for w in hrv.rolling(clean, window_s=window_s, step_s=60.0, min_coverage=0.75, min_quality=0.85):
+    for w in hrv.rolling(clean, window_s=window_s, step_s=60.0, min_coverage=0.75, min_quality=0.85,
+                         spectral=full, dfa=full):
         i = (w.t_end_ms - bins[0]) // MIN - 1
         if 0 <= i < bins.size:
             if e_ts.size:
@@ -132,6 +134,30 @@ def hrv_minutes(conn: sqlite3.Connection, start_ms: int, end_ms: int, window_s: 
             out[M.HR_RR][i] = w.mean_hr
             out[M.RR_QUALITY][i] = w.quality
     return out
+
+
+def _hrv_history(conn: sqlite3.Connection, start_ms: int, end_ms: int) -> dict[str, np.ndarray]:
+    """Historical HRV windows: read the derived series earlier days already persisted (cheap);
+    recompute from raw RR only when the history was never analysed."""
+    bins = grid(start_ms, end_ms)
+    n_cached = conn.execute(
+        "SELECT COUNT(*) FROM samples WHERE metric = ? AND source = ? AND ts_ms >= ? AND ts_ms < ?",
+        (M.LN_RMSSD, M.DERIVED, start_ms, end_ms),
+    ).fetchone()[0]
+    n_raw = conn.execute("SELECT COUNT(*) FROM rr_intervals WHERE ts_ms >= ? AND ts_ms < ?", (start_ms, end_ms)).fetchone()[0]
+    # cached windows exist and cover most of what the raw RR could give (~1 window per 80 beats)
+    if n_cached >= 30 and n_cached >= 0.5 * n_raw / 80:
+        out = {}
+        for k in (M.LN_RMSSD, ENMO_WIN):
+            ts, v = store.series(conn, k, start_ms, end_ms, source=M.DERIVED)
+            arr = np.full(bins.size, np.nan)
+            if ts.size:
+                idx = ((ts - bins[0]) // MIN).astype(int)
+                ok = (idx >= 0) & (idx < bins.size)
+                arr[idx[ok]] = v[ok]
+            out[k] = arr
+        return out
+    return hrv_minutes(conn, start_ms, end_ms, full=False)  # history only needs ln RMSSD
 
 
 @dataclass
@@ -230,7 +256,7 @@ def analyze_day(conn: sqlite3.Connection, day: date, tz: str, write: bool = True
     hv = hrv_minutes(conn, start, end)
     hrv_z = np.full(ts.size, np.nan)
     if np.any(np.isfinite(hv[M.LN_RMSSD])):
-        hist = hrv_minutes(conn, fit_start, start)
+        hist = _hrv_history(conn, fit_start, start)
 
         def still(h: dict, steps: np.ndarray) -> np.ndarray:
             e = h[ENMO_WIN]
@@ -292,6 +318,5 @@ def _persist(conn: sqlite3.Connection, a: DayAnalysis) -> None:
         store.upsert_samples(conn, M.AROUSAL_Z, M.DERIVED, rows(a.arousal))
         store.upsert_samples(conn, M.AROUSAL_SD, M.DERIVED, rows(a.arousal_sd))
         for k, v in a.hrv.items():
-            if k != ENMO_WIN:
-                store.upsert_samples(conn, k, M.DERIVED, rows(v))
+            store.upsert_samples(conn, k, M.DERIVED, rows(v))
         store.put_artefact(conn, "analysis:day", a.day, a.summary())

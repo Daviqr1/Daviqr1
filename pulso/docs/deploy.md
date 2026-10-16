@@ -40,11 +40,41 @@ sincronize o Garmin Connect (`pulso import garmin --days 30`), use a ponte BLE n
 (`pulso bridge watch`) e converse com o Claude pelo MCP em stdio. Só o mostrador fica sem os números
 da central.
 
+## Seu histórico do Garmin Connect
+
+Quanto mais histórico, melhores os modelos pessoais (normal por horário, FC adicional, HRV noturna,
+controles pareados das reuniões). Dois caminhos, que se complementam:
+
+1. **Export da conta (anos de histórico, recomendado)** — no site da Garmin: Conta → Gerenciamento de
+   dados → *Exportar seus dados*. Chega por e-mail um zip com todos os FIT originais (monitoramento,
+   sono, HRV, atividades) e resumos em JSON. Depois:
+
+   ```bash
+   pulso import garmin-export ~/Downloads/garmin-export.zip     # zips aninhados, idempotente
+   ```
+
+   Os FIT ficam guardados em `$PULSO_ARCHIVE/export/` (fonte da verdade; dá para redecodificar quando a
+   Garmin documentar mensagens novas).
+2. **Sincronização pela API não oficial (últimos meses, e dali em diante todo dia)**:
+
+   ```bash
+   pulso import garmin --days 180                 # retomável: dias já baixados são pulados
+   pulso import garmin --since 2025-01-01 --pause 5
+   pulso import garmin --days 365 --reload-cold   # pede recarga de dias em armazenamento frio
+   ```
+
+   A Garmin move o intradiário com mais de ~6 meses para armazenamento frio (a API devolve vazio). Com
+   `--reload-cold` o Pulso pede a recarga (no máximo 20 por execução; a Garmin limita por dia) e baixa esses
+   dias numa execução seguinte. Para anos, o export é mais rápido e completo.
+
+Depois do backfill: `pulso analyze --since 2025-01-01` (≈ 1 s por dia com RR; menos sem RR).
+
 ## Primeiro uso, em ordem
 
 ```bash
 pip install -e 'central[all]'                    # Python ≥ 3.12 (a garminconnect 0.3.x exige)
 pulso token create fr255
+pulso import garmin-export garmin-export.zip     # se já pediu o export da conta
 pulso import garmin --days 30                    # histórico recente (GARMIN_EMAIL/PASSWORD no 1º login)
 pulso import fit /caminho/GARMIN                 # se tiver o relógio no USB (modo MTP)
 pulso import ics agenda.ics --me voce@empresa.com

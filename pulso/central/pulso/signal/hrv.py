@@ -90,7 +90,8 @@ def frequency_domain(ts_ms: np.ndarray, rr: np.ndarray) -> dict[str, float]:
     if t[-1] < HF_MIN_S:
         return nan
     y = rr - rr.mean()
-    f = np.linspace(VLF[0], HF[1], 800)
+    # grid sized to what the window can resolve: HF only when LF is not computable anyway
+    f = np.linspace(HF[0], HF[1], 101) if t[-1] < LF_MIN_S else np.linspace(VLF[0], HF[1], 400)
     # Unnormalised Lomb-Scargle gives P = N*A^2/4 at the peak of a sinusoid of amplitude A;
     # the peak is ~1/T wide (T = N/fs), so PSD = 2P/fs integrates to the variance A^2/2.
     p = lombscargle(t, y, 2 * np.pi * f)
@@ -115,6 +116,19 @@ def frequency_domain(ts_ms: np.ndarray, rr: np.ndarray) -> dict[str, float]:
     )
 
 
+_PINV: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+
+
+def _detrend_ops(n: int) -> tuple[np.ndarray, np.ndarray]:
+    ops = _PINV.get(n)
+    if ops is None:
+        x = np.arange(n, dtype=np.float64)
+        A = np.vstack([x, np.ones(n)]).T
+        ops = (A, np.linalg.pinv(A))
+        _PINV[n] = ops
+    return ops
+
+
 def dfa_alpha1(rr: np.ndarray, scales: range = range(4, 17)) -> float:
     """Short-term DFA scaling exponent. Needs ~>= 100 beats to be stable (Rogers uses 2-min windows)."""
     rr = np.asarray(rr, dtype=np.float64)
@@ -126,9 +140,7 @@ def dfa_alpha1(rr: np.ndarray, scales: range = range(4, 17)) -> float:
         k = y.size // n
         if k < 4:
             continue
-        x = np.arange(n, dtype=np.float64)
-        A = np.vstack([x, np.ones(n)]).T
-        pinv = np.linalg.pinv(A)
+        A, pinv = _detrend_ops(n)
         flucts = []
         # forward and backward segmentation so the tail is not ignored
         for segs in (y[: k * n].reshape(k, n), y[y.size - k * n :].reshape(k, n)):
@@ -145,17 +157,22 @@ def dfa_alpha1(rr: np.ndarray, scales: range = range(4, 17)) -> float:
     return float(slope)
 
 
-def window_metrics(ts_ms: np.ndarray, rr: np.ndarray, flag: np.ndarray, t0: int, t1: int) -> HrvWindow:
-    m = (ts_ms >= t0) & (ts_ms < t1)
-    wts, wrr, wfl = ts_ms[m], rr[m], flag[m]
+_NO_FD = dict(lf=math.nan, hf=math.nan, lf_hf=math.nan, hf_peak_hz=math.nan, resp_rate_rsa=math.nan)
+
+
+def window_metrics(ts_ms: np.ndarray, rr: np.ndarray, flag: np.ndarray, t0: int, t1: int,
+                   spectral: bool = True, dfa: bool = True) -> HrvWindow:
+    """Metrics for beats closing in [t0, t1). `ts_ms` must be sorted (slicing by binary search)."""
+    i0, i1 = np.searchsorted(ts_ms, [t0, t1])
+    wts, wrr, wfl = ts_ms[i0:i1], rr[i0:i1], flag[i0:i1]
     dur = max(1.0, (t1 - t0))
     coverage = float(min(1.0, np.sum(wrr) / dur)) if wrr.size else 0.0
     quality = float(np.mean(wfl == FLAG_OK)) if wrr.size else 0.0
     td = time_domain(wrr)
-    fd = frequency_domain(wts, wrr) if wrr.size else frequency_domain(np.empty(0), np.empty(0))
+    fd = frequency_domain(wts, wrr) if (spectral and wrr.size) else dict(_NO_FD)
     return HrvWindow(
         t_start_ms=int(t0), t_end_ms=int(t1), n_beats=int(wrr.size), coverage=coverage, quality=quality,
-        dfa_a1=dfa_alpha1(wrr), **td, **fd,
+        dfa_a1=dfa_alpha1(wrr) if dfa else math.nan, **td, **fd,
     )
 
 
@@ -165,17 +182,25 @@ def rolling(
     step_s: float = 60.0,
     min_coverage: float = 0.8,
     min_quality: float = 0.9,
+    spectral: bool = True,
+    dfa: bool = True,
 ) -> list[HrvWindow]:
     """Sliding windows over a cleaned series; windows failing coverage/quality are dropped,
-    not filled. Returned windows are aligned to multiples of step_s (UTC)."""
+    not filled. Returned windows are aligned to multiples of step_s (UTC). Turn off `spectral`
+    / `dfa` when only time-domain metrics are needed (much faster on long histories)."""
     if clean.rr_ms.size == 0:
         return []
-    ts, rr, fl = clean.ts_ms, clean.rr_ms, clean.flag
+    order = np.argsort(clean.ts_ms, kind="stable")
+    ts, rr, fl = clean.ts_ms[order], clean.rr_ms[order], clean.flag[order]
     w, st = int(window_s * 1000), int(step_s * 1000)
     start = (int(ts[0]) // st) * st
     out: list[HrvWindow] = []
+    # skip empty stretches quickly: only windows whose end can contain beats
     for t0 in range(start, int(ts[-1]) - w + st + 1, st):
-        hw = window_metrics(ts, rr, fl, t0, t0 + w)
+        i0, i1 = np.searchsorted(ts, [t0, t0 + w])
+        if (i1 - i0) * 2000 < min_coverage * w:  # cannot reach coverage even with 2-s intervals
+            continue
+        hw = window_metrics(ts, rr, fl, t0, t0 + w, spectral=spectral, dfa=dfa)
         if hw.coverage >= min_coverage and hw.quality >= min_quality:
             out.append(hw)
     return out
