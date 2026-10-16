@@ -151,7 +151,16 @@ def test_gate_zero_and_unreadable_words_in_the_facts():
     assert 0.0 not in book.by_id()[vc].numbers
     for bad in ("A diferença foi de 0 z.", "Diferença zero entre reunião e controle.", "Foram 0 reuniões."):
         assert F.gate(bad, [vc], book), bad
-    assert F.gate("O IC não cruza o zero.", [vc], book) == []
+    # the verdict is checked too: the fact says it crosses
+    assert F.gate("O IC95 inclui o zero.", [vc], book) == []
+    assert F.gate("O IC não cruza o zero.", [vc], book)
+    assert F.gate("O efeito é real: o IC não cruza o zero.", [book.add("fala", f"Pessoa A: 0,62 z, {F._ci95(0.2, 1.0)}.")], book) == []
+    # "incluindo zero" outside an IC is a count, and 0 is in no cited fact
+    day = book.add("dia", "2026-10-15 (quinta-feira): 3 episódios de estresse, 42 min acima de 1,5 z, 2 reuniões.")
+    for bad in ("Dia com 3 episódios de estresse, incluindo zero mentais.", "A semana inclui zero noites boas.",
+                "Foram 2 reuniões, incluindo zero com pausa.", "Incluindo ZERO episódios."):
+        assert F.gate(bad, [day], book), bad
+    assert F.gate("A diferença cruzando zero z.", [vc], book)
     assert F._ci95(None, 0.4) == "IC95 — a 0,40"
     # a meeting title the patterns match but cannot read adds nothing to the fact, and checking against it
     # does not raise (a NaN left in the pool would reach round())

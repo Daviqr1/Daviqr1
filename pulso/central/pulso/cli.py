@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -28,12 +29,14 @@ def _expand(items: list[str]) -> list[str]:
     """Patterns the shell left as typed (PowerShell/cmd expand neither `*` nor `~` for `pulso`). An
     existing literal path is never re-globbed; a pattern that matches nothing is kept as typed."""
     import glob
-    import os
 
     out: list[str] = []
     for a in items:
         p = os.path.expanduser(a)
-        out += [p] if os.path.exists(p) or not glob.has_magic(p) else (sorted(glob.glob(p)) or [a])
+        if os.path.exists(p) or not glob.has_magic(p):
+            out.append(p)
+        else:  # "[2026]" in a folder name is literal far more often than a character class
+            out += sorted(glob.glob(p)) or sorted(glob.glob(p.replace("[", "[[]"))) or [a]
     return out
 
 
@@ -169,12 +172,15 @@ def main(argv: list[str] | None = None) -> int:
             if start is not None and start.tzinfo is None:
                 start = start.replace(tzinfo=ZoneInfo(tz))
             for f in _expand(args.files):
-                print(transcripts.import_file(conn, f, start=start, title=args.title))
+                try:
+                    print(transcripts.import_file(conn, f, start=start, title=args.title))
+                except OSError as e:  # a pattern that matched nothing: say so and go on with the rest
+                    print(f"{f}: pulado ({e.strerror or e})", file=sys.stderr)
         elif args.icmd == "ics":
             from pulso.importers import calendar_ics
 
             today = datetime.now(ZoneInfo(tz)).date()
-            n = calendar_ics.import_ics(conn, args.file, tz, args.since or today - timedelta(days=90),
+            n = calendar_ics.import_ics(conn, os.path.expanduser(args.file), tz, args.since or today - timedelta(days=90),
                                         args.to or today + timedelta(days=30), me=args.me)
             print(f"{n} eventos")
         elif args.icmd == "git":
@@ -192,7 +198,11 @@ def main(argv: list[str] | None = None) -> int:
         elif args.icmd == "fit":
             from pulso.importers import fit
 
-            _print(fit.import_paths(conn, _expand(args.paths), tz))
+            paths = _expand(args.paths)
+            for q in paths:
+                if not os.path.exists(q):   # watch not mounted, pattern that matched nothing
+                    print(f"{q}: não encontrado", file=sys.stderr)
+            _print(fit.import_paths(conn, [q for q in paths if os.path.exists(q)], tz))
         elif args.icmd == "garmin":
             from pulso.importers import garmin_connect
 
@@ -206,7 +216,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.icmd == "garmin-export":
             from pulso.importers import garmin_export
 
-            _print(garmin_export.import_export(conn, args.path, tz))
+            _print(garmin_export.import_export(conn, os.path.expanduser(args.path), tz))
         return 0
 
     if args.cmd == "analyze":

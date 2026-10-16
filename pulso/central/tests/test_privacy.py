@@ -247,3 +247,16 @@ def test_raw_fields_never_keep_a_pessoa_that_is_a_name(conn, monkeypatch):
         once = T(x)
         assert leak not in once, (x, once)
         assert T(once, final=True) == once, (x, once)
+
+
+def test_two_letter_names_are_pseudonymised_alone(conn):
+    """review: "Zé", "Lu", "Sá", "Wu" are names; "a pauta e a ata", "Na segunda", "Em 2026" are not."""
+    store.upsert_event(conn, Event("c9", "calendar", 0, MIN, "kickoff", "ics", {"attendees": [
+        "Zé Pessoa", "Lu Sá", "Ed Wu"]}))
+    T = Pseudonyms(conn)
+    for x, names in (("Café com Zé", ["Zé"]), ("1:1 Lu", ["Lu"]), ("Sá: revisão", ["Sá"]), ("Wu / Ed", ["Wu", "Ed"])):
+        once = T(x)
+        assert not any(re.search(rf"\b{n}\b", once) for n in names), (x, once)
+        assert T(once, final=True) == once
+    for x in ("a pauta e a ata", "Na segunda", "Em 2026", "zero ruído", "luz"):
+        assert T(x) == x, (x, T(x))

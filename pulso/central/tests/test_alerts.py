@@ -173,3 +173,12 @@ def test_alert_level_line():
     alerts.evaluate(conn, now, TZ)
     lvl, why = summary.alert_level(conn, now + MIN)
     assert lvl == "ALTO" and "Ativação alta" in why
+
+
+def test_meeting_alert_title_is_cut_between_words():
+    """review: "Feedback com Fernanda Albuquerque"[:28] left "Albuqu", which the pseudonymizer no longer
+    recognises, in the alert text that goes to the exported Docs."""
+    assert alerts._short("Feedback com Fernanda Albuquerque") == "Feedback com Fernanda…"
+    assert alerts._short("weekly-sync-fernanda-albuquerque-q4") == "weekly-sync-fernanda…"
+    assert alerts._short("Curta") == "Curta"
+    assert alerts._short("Supercalifragilisticexpialidocious") == "…"

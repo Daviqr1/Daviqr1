@@ -438,3 +438,27 @@ def test_cli_expands_patterns_the_shell_left_as_typed(tmp_path, monkeypatch):
     lit = tmp_path / "reunioes" / "[x].vtt"   # an existing literal path is never re-globbed
     lit.write_text("WEBVTT\n")
     assert _expand([str(lit)]) == [str(lit)]
+
+
+def test_cli_paths_from_shells_that_expand_nothing(tmp_path, monkeypatch, capsys):
+    """review: `~` for ics/garmin-export, a pattern that matches nothing is reported (not a crash) and the
+    rest still imports, and "[2026]" in a folder name is literal."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    pytest.importorskip("icalendar")
+    (tmp_path / "agenda.ics").write_text(
+        "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nDTSTART:20261015T130000Z\nDTEND:20261015T140000Z\n"
+        "UID:a@x\nSUMMARY:Planejamento\nEND:VEVENT\nEND:VCALENDAR\n")
+    db = str(tmp_path / "p.sqlite")
+    assert cli.main(["--db", db, "import", "ics", "~/agenda.ics", "--since", "2026-10-01", "--to", "2026-10-31"]) == 0
+    assert "1 eventos" in capsys.readouterr().out
+    folder = tmp_path / "Reuniões [2026]"
+    folder.mkdir()
+    (folder / "ok.vtt").write_text("WEBVTT\n\n00:00:01.000 --> 00:00:03.000\nAna: oi\n")
+    assert cli.main(["--db", db, "import", "transcript", str(tmp_path / "nada" / "*.srt"), str(folder / "*.vtt"),
+                     "--start", "2026-10-15T10:00:00"]) == 0
+    out, err = capsys.readouterr()
+    assert "pulado" in err and "ok.vtt" not in err
+    assert len(store.events(store.connect(db), 0, 2**62, kinds=["meeting"])) == 1
+    assert cli.main(["--db", db, "import", "fit", str(tmp_path / "nada" / "*.fit")]) == 0
+    assert "não encontrado" in capsys.readouterr().err

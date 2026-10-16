@@ -59,6 +59,7 @@ class Fact:
     times: list[str] = field(default_factory=list)
     dates: list[str] = field(default_factory=list)
     weekdays: list[int] = field(default_factory=list)   # 0 = Monday: of its full dates, and any it names
+    verdicts: list[bool] = field(default_factory=list)  # CI verdicts it states: True = "cruza o zero"
 
 
 class FactBook:
@@ -92,7 +93,8 @@ def _fact(fid: str, text: str, topic: str) -> Fact:
             days.add(date.fromisoformat(d).weekday())
         except ValueError:  # '--10-15' (no year) or an impossible day
             pass
-    return Fact(fid, text, topic, extract_numbers(text), extract_times(text), dates, sorted(days))
+    return Fact(fid, text, topic, extract_numbers(text), extract_times(text), dates, sorted(days),
+                extract_verdicts(text))
 
 
 # Tokens the gate checks, in this order (each one is blanked out before the next pattern runs):
@@ -111,8 +113,10 @@ def _fact(fid: str, text: str, topic: str) -> Fact:
 # "cruza o zero" (a verdict, not a value: it would let "0 z" stand for a fact with decimals). A token the patterns match but cannot read ("ſete", "MİL": IGNORECASE folds them
 # to ASCII, .lower() does not) fails the gate instead of raising.
 _FID = re.compile(r"\bF\d+\b")                                   # fact ids are not numbers
-_CROSS = re.compile(r"\b(?:n[ãa]o\s+)?(?:cruza|cruzam|cruzando|cruzar|inclui|incluem|incluindo)\s+(?:o\s+)?zero\b",
-                    re.IGNORECASE)                                 # a CI verdict, not a value
+# a CI verdict, not a value; only when an IC/intervalo is its subject ("incluindo zero episódios" is a count)
+_CROSS = re.compile(r"\b(?:IC\d*|intervalos?)\b(?:[^.;!?\n]|(?<=\d)\.(?=\d)){0,60}?"
+                    r"\b((?:n[ãa]o\s+)?(?:cruza|cruzam|cruzando|cruzar|inclui|incluem|incluindo)\s+(?:o\s+)?zero)\b",
+                    re.IGNORECASE)
 _ISO = re.compile(r"(?<![\d-])(\d{4})-(\d{2})-(\d{2})(?!\d)")
 _MONTHS = {"janeiro": 1, "fevereiro": 2, "março": 3, "marco": 3, "abril": 4, "maio": 5, "junho": 6, "julho": 7,
            "agosto": 8, "setembro": 9, "outubro": 10, "novembro": 11, "dezembro": 12}
@@ -166,7 +170,7 @@ _WEEKDAY_N = {"segunda": 0, "terça": 1, "terca": 1, "quarta": 2, "quinta": 3, "
 @dataclass
 class _Tok:
     pos: int
-    kind: str            # date | time | hour | num | weekday
+    kind: str            # date | time | hour | num | weekday | verdict
     value: float | str
     raw: str
     nd: int = 0          # decimals written (num)
@@ -182,7 +186,9 @@ def _date(y: int | None, m: int, d: int) -> str | None:
 def _scan(text: str) -> list[_Tok]:
     toks: list[_Tok] = []
     t = _FID.sub(lambda m: " " * len(m.group(0)), text)
-    t = _CROSS.sub(lambda m: " " * len(m.group(0)), t)
+    for m in _CROSS.finditer(t):   # the verdict is a token of its own (a flipped one must fail); its "zero" is no value
+        toks.append(_Tok(m.start(1), "verdict", 0.0 if re.match(r"n[ãa]o\b", m[1], re.IGNORECASE) else 1.0, m[1]))
+    t = _CROSS.sub(lambda m: m[0][: m.start(1) - m.start()] + " " * len(m[1]), t)   # keep the CI bounds
 
     def take(rx: re.Pattern, make) -> None:
         nonlocal t
@@ -251,6 +257,10 @@ def extract_weekdays(text: str) -> list[int]:
     return [int(k.value) for k in _scan(text) if k.kind == "weekday" and k.value >= 0]
 
 
+def extract_verdicts(text: str) -> list[bool]:
+    return [bool(k.value) for k in _scan(text) if k.kind == "verdict"]
+
+
 def _matches(x: float, nd: int, pool: list[float]) -> bool:
     """x, written with nd decimals, is one of pool rounded to nd decimals (sign-insensitive:
     "caiu 0,4" for a fact stored as -0,4). An integer never stands for a fact with decimals
@@ -275,6 +285,7 @@ def gate(text: str, cited: list[str], book: FactBook) -> list[str]:
     hours = {float(t[:2]) for t in times}
     dates = {d for c in cited for d in facts[c].dates}
     weekdays = {w for c in cited for w in facts[c].weekdays}
+    verdicts = {v for c in cited for v in facts[c].verdicts}
     probs = []
     for k in _scan(text or ""):
         if k.kind == "num" and not _matches(float(k.value), k.nd, nums):
@@ -290,6 +301,8 @@ def gate(text: str, cited: list[str], book: FactBook) -> list[str]:
                 ok = all(_matches(v, 0, nums) for v in k.ratio)
             if not ok:
                 probs.append(f"data {k.raw} não está nos fatos citados")
+        elif k.kind == "verdict" and bool(k.value) not in verdicts:
+            probs.append(f"“{k.raw}” não é o que os fatos citados dizem do intervalo de confiança")
         elif k.kind == "weekday" and k.value not in weekdays:
             probs.append(f"dia da semana {k.raw} não corresponde às datas dos fatos citados")
     return probs

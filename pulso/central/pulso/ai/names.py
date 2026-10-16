@@ -46,6 +46,8 @@ _GLUE = "-_."                                       # inside identifiers: file s
 _EDGE_L = r"(?<![^\W_])"
 _EDGE_R = r"(?![^\W_]|[" + _APOS + r"](?!(?i:s|d|m|ll|re|ve)(?![^\W_]))[^\W_])"
 _PARTICLES = {"da", "de", "do", "das", "dos", "e", "di", "du", "del", "della", "der", "van", "von", "la", "le"}
+# two-letter words that start sentences far more often than they name someone ("Zé", "Lu", "Sá", "Wu" do count)
+_SHORT = {"eu", "em", "no", "na", "nos", "os", "as", "ao", "se", "me", "te", "ou", "um", "ja", "la", "so", "ha", "o", "a"}
 _PSEUDO = re.compile(_EDGE_L + r"Pessoa [A-Z]\d*(?:/[A-Z]\d*)*" + _EDGE_R)   # what alias() writes, as written
 
 
@@ -139,7 +141,7 @@ class Pseudonyms:
         frags: dict[tuple[str, ...], list[str]] = {}
         for key, (_, _, email) in people.items():
             toks = tuple(key.split())
-            if len(toks) == 1 and len(key) <= 2:  # diarisation labels "A", "B": only as a whole label, never "a" in a sentence
+            if len(toks) == 1 and (len(key) <= 1 or key in _SHORT):  # diarisation labels "A", "B": only as a whole label
                 continue
             frags.setdefault(toks, []).append(key)
             # "Time Eng" from time.eng@ must not turn every "time" into a person, nor "Speaker 1" every "speaker"
@@ -150,13 +152,15 @@ class Pseudonyms:
                     span = toks[i:j]
                     if span == toks or span[0] in _PARTICLES or span[-1] in _PARTICLES:
                         continue
-                    if len(span) == 1 and (len(span[0]) <= 2 or span[0] in me or any(c.isdigit() for c in span[0])):
+                    if len(span) == 1 and (len(span[0]) <= 1 or span[0] in _SHORT or span[0] in me
+                                           or any(c.isdigit() for c in span[0])):
                         continue
                     frags.setdefault(span, []).append(key)
 
         # single words that are only ever a surname/middle name: matched when capitalised ("Dias", not "dias")
         firsts = {k.split()[0] for k in people}
-        self._cased = {s for s in frags if len(s) == 1 and s[0] not in firsts}
+        # two-letter names likewise ("Zé", "Lu"): only capitalised, so "ze"/"lu" inside words never match
+        self._cased = {s for s in frags if len(s) == 1 and (s[0] not in firsts or len(s[0]) <= 2)}
 
         self.alias: dict[tuple[str, ...], str] = {}
         self.back: dict[str, str] = {}

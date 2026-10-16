@@ -14,7 +14,9 @@ alertas no Agenda.
 
 “Nomes reconhecidos” são os de participantes e falantes que a central conhece (convidados da agenda e
 falantes das transcrições): viram **Pessoa A, B…**. Um nome que só aparece no título do evento, ou um
-convidado só com e-mail de uma palavra (como `carla@…`), **não** é reconhecido e sai como está.
+convidado só com e-mail de uma palavra (como `carla@…`), **não** é reconhecido e sai como está. De um
+convidado só com e-mail de duas ou mais palavras (`bruno.costa@…`), só o nome inteiro (“Bruno Costa”) vira
+Pessoa; “Bruno” ou “Costa” sozinhos saem como estão.
 
 | Destino | Quando | Condição | O que vai |
 |---|---|---|---|
@@ -55,9 +57,10 @@ na borda da Cloudflare, que vê as requisições decifradas. A ponte BLE (`--ble
 
 - **Pseudônimos estáveis** (`central/pulso/ai/names.py`): todo falante e participante conhecido vira
   Pessoa A, B…, a mesma letra no relatório e nos Docs, de uma execução para a outra. Vale para o nome
-  inteiro, o primeiro nome e o sobrenome sozinho, também dentro de nomes de arquivo (`1-1-ana-souza`,
+  inteiro, o primeiro nome e o sobrenome sozinho (de quem só tem e-mail, só o nome inteiro), também dentro de nomes de arquivo (`1-1-ana-souza`,
   `1-1-souza`) e com qualquer apóstrofo (D'Ávila, D’Ávila); no meio de uma frase, o sobrenome sozinho só
-  conta com maiúscula (“dias” e “costa” também são palavras comuns). Duas pessoas com o mesmo primeiro
+  conta com maiúscula (“dias” e “costa” também são palavras comuns), e o mesmo vale para nomes de duas
+  letras (“Zé”, “Lu”). Duas pessoas com o mesmo primeiro
   nome não se confundem (“Ana” sozinha vira “Pessoa A/B”). Seus próprios nomes (`PULSO_ME`) ficam como
   estão, mas só o nome inteiro conta: coloque em `PULSO_ME` também o seu nome completo como a agenda e
   as transcrições o escrevem (`PULSO_ME=eu,davi,davi becam`). Um colega que só tem o mesmo primeiro nome
@@ -71,8 +74,8 @@ na borda da Cloudflare, que vê as requisições decifradas. A ponte BLE (`--ble
   data, dia da semana (“segunda-feira” ou “segunda feira”) e horário (também “meio-dia” e “meia-noite”) da
   resposta precisa estar nos fatos que ela cita. Ficam de fora “um”/“uma” e “segunda” sem “feira” (também
   artigo e ordinal), frações, proporções, ordinais e coletivos por extenso (“meia hora”, “metade”, “o dobro”,
-  “terceira noite”, “dúzia”, “dezena”, “centena”, “milhão”) e o “zero” de “o IC cruza o zero” (um veredito,
-  não um valor).
+  “terceira noite”, “dúzia”, “dezena”, “centena”, “milhão”) e o “zero” de “o IC cruza o zero” (um veredito
+  sobre o intervalo, não um valor; “incluindo zero episódios” continua sendo verificado).
 - **Tokens com hash**: a central guarda só o SHA-256 dos tokens de aparelho.
 - **Sem telemetria**: além do que está nas tabelas acima, nada é enviado para terceiros.
 

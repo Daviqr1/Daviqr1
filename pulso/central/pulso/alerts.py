@@ -15,6 +15,7 @@ a native notification once per id), the MCP exposes them, and the NotebookLM sum
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -40,6 +41,15 @@ class Alert:
     def as_dict(self) -> dict:
         return asdict(self)
 
+
+
+def _short(title: str, n: int = 28) -> str:
+    """Cut between words, never inside one: half a surname ("Albuqu") is no longer a name the
+    pseudonymizer recognises, and the alert text goes to the exported Docs."""
+    if len(title) <= n:
+        return title
+    m = re.match(r"(.*)[\s._,-]", title[: n + 1], re.S)
+    return (m[1].rstrip(" ._,-") if m else "") + "…"
 
 def _hhmm(ms: int, tz: str) -> str:
     return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).astimezone(ZoneInfo(tz)).strftime("%H:%M")
@@ -106,7 +116,7 @@ def evaluate(conn: sqlite3.Connection, now_ms: int, tz: str) -> list[Alert]:
             continue
         risk = predicted_meeting_load(conn, ev.title, ev.attrs.get("attendees"))
         if risk is not None and risk >= 2:
-            fired.append(Alert(aid, "reuniao", now_ms, f"{(ev.title or 'Reunião')[:28]} às {_hhmm(ev.start_ms, tz)}: costuma pesar",
+            fired.append(Alert(aid, "reuniao", now_ms, f"{_short(ev.title or 'Reunião')} às {_hhmm(ev.start_ms, tz)}: costuma pesar",
                                f"Reuniões parecidas com '{ev.title}' tiveram carga {risk}/3. Dois minutos de respiração antes ajudam."))
 
     # sequência: back-to-back block ahead today
