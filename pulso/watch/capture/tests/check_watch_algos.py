@@ -3,9 +3,10 @@
 These are hand transliterations of the Monkey C code (float32 where the watch uses Float), run
 against the central's reference implementations and simple simulations. Keep them in sync with
 source/HrvLive.mc, AccelFeatures.mc, BatchBuilder.mc, Governor.mc, BleLink.mc and Json.mc (for
-BleLink: frame layout, HELLO and its proof, the blob MAC over q, the signed blob ack and its
-attempt check, the stream type filter and the time base reset on HELLO, all against the bridge's
-real decoder in central/pulso/bridge/frames.py and handle_blob in peripheral.py).
+BleLink: frame layout, HELLO and its proof, the blob MAC over q, the signed blob ack, its attempt
+check and its binding to the blob MAC (a cross-life replay under the same q never clears the batch),
+the stream type filter and the time base reset on HELLO, all against the bridge's real decoder in
+central/pulso/bridge/frames.py and handle_blob in peripheral.py).
 
     python3 watch/capture/tests/check_watch_algos.py      (needs numpy + pydantic for the wire test)
 """
@@ -429,15 +430,17 @@ def i32(v: int) -> int:
     return v - (1 << 32) if v >= 1 << 31 else v
 
 
-def watch_ack_status(v: bytes, blob_q: int, attempt: int, key: bytes, nonce: bytes) -> int:
+def watch_ack_status(v: bytes, blob_q: int, attempt: int, key: bytes, nonce: bytes, blob_mac: bytes) -> int:
     """BleLink.onCharacteristicChanged + ackStatus: the status; -1 ignored (another batch or
-    attempt), -2 ignored and the link re-proven (our attempt, MAC does not check)."""
+    attempt), -2 ignored and the link re-proven (our attempt, MAC does not check). `blob_mac` is
+    the watch's own _blobMac: signed in for a verdict (status 0/1), 16 zero bytes otherwise."""
     if not (len(v) >= 17 and v[2] == 0xB1):
         return -1
     q = i32(v[3] | (v[4] << 8) | (v[5] << 16) | (v[6] << 24))
     if q != i32(blob_q) or v[7] != attempt:
         return -1
-    mac = watch_hmac(key, b"pulso-ack", nonce, bytes(v[3:9]), n=8)
+    body = bytes(v[3:9]) + (bytes(blob_mac) if v[8] <= 1 else bytes(16))
+    mac = watch_hmac(key, b"pulso-ack", nonce, body, n=8)
     return v[8] if watch_same(v, 9, mac, 8) else -2
 
 
@@ -499,6 +502,9 @@ def test_ble_frames() -> None:
     # sendBlob signs label | q4 | json, q4 being put32(q): what watch_blob transliterates
     blob_mac_src = bool(re.search(r'put32\(q4, 0, q\);\s*var mac = \(_key != null\) \? hmac\(_key as ByteArray, '
                                   r'Json\.utf8\("pulso-blob"\), q4, json, 16\)', src))
+    # ackStatus signs q | attempt | status | (our blob MAC for a verdict, else 16 zeros): watch_ack_status
+    ack_src = bool(re.search(r'var body = v\.slice\(3, 9\)\.addAll\(v\[8\] <= 1 \? _blobMac : new \[16\]b\);\s*'
+                             r'var mac = hmac\(_key as ByteArray, Json\.utf8\("pulso-ack"\), _nonce, body, 8\);', src))
     uuids = set(re.findall(r"6c1e000[123]-5b7a-4d6e-9f2a-50554c534f31", src))
     same_uuids = uuids == {P.SERVICE_UUID, P.DATA_UUID, P.CTRL_UUID}
 
@@ -574,19 +580,49 @@ def test_ble_frames() -> None:
         other = [e for e in _decode(watch_blob(12, body, tok)) if isinstance(e, FR.Blob)]
         st_other = P.handle_blob(sink, other[0].q, other[0].payload, other[0].mac, log=lambda m: None) if other else -1
         same_rr = conn.execute("SELECT COUNT(*) FROM rr_intervals").fetchone()[0] == n_rr
+        # cross-life replay: the q space restarts with the app's Storage (and a second watch may
+        # share the token). Life A's batch 13 was sniffed; while life B (nonce N) sends its own 13,
+        # someone writes HELLO(kid, N) mid-blob (the decoder drops B's blob, the link nonce stays N),
+        # then START(13, a) + A's DATA/END. The bridge stores A's content and signs "stored" for
+        # (13, a) under N, as serve() does (with the MAC it verified): watch B must not take it as
+        # the fate of its own 13, and its resend (next attempt) must then be acknowledged
+        life_a = watch_blob(13, json.dumps(dict(batch, d="fr255-cap-ffffff", q=13)).encode(), tok, attempt=9)
+        body_b = watch_json(dict(batch, q=13), budget=50).encode()
+        life_b = watch_blob(13, body_b, tok, attempt=5)
+        mac_b = bytes(life_b[-1][4:20])
+        replay = [watch_hello(tok, nonce)[0]] + life_b[:2] + [watch_hello(tok, nonce)[0]] + life_b[2:] \
+            + [bytearray(b"\0\x08") + (13).to_bytes(4, "little") + bytes((5,))] + life_a[1:] \
+            + watch_blob(13, body_b, tok, attempt=6)
+        acks_b = []
+        for e in _decode(replay):
+            if isinstance(e, FR.Blob):
+                st_x = P.handle_blob(sink, e.q, e.payload, e.mac, log=lambda m: None)
+                acks_b.append((st_x, watch_ack_status(FR.blob_ack(0, 25, e.q, e.attempt, st_x, key, nonce, e.mac),
+                                                      13, e.attempt, key, nonce, mac_b)))
+        stored13 = {r[0] for r in conn.execute("SELECT batch_id FROM ingest_batches WHERE batch_id LIKE '%:13'")}
+    # A's replay is stored (genuine, signed) but its "stored" never checks for B (-2: B keeps its 13
+    # and re-proves the link); B's own resend is stored and acknowledged
+    ok_cross = (acks_b == [(FR.BLOB_OK, -2), (FR.BLOB_OK, FR.BLOB_OK)]
+                and stored13 == {"fr255-cap-ffffff:13", "fr255-cap-a1b2c3:13"})
     ok_blob = [type(e) for e in events] == [FR.Blob] and blobs[0].attempt == 2 and st == FR.BLOB_OK
+    mac12 = bytes(watch_blob(12, body, tok)[-1][4:20])     # what the watch signed for its own 12
     ok_relabel = (blob_mac_src and st_relabel == FR.BLOB_BAD_MAC and st_other == FR.BLOB_RETRY and same_rr
-                  and watch_ack_status(FR.blob_ack(0, 25, 12, 4, st_relabel, key, nonce), 12, 4, key, nonce)
-                  == FR.BLOB_BAD_MAC)
-    # the bridge's signed ack, as the watch reads it: only for this nonce, batch, attempt and key
-    ack = FR.blob_ack(0, 25, 11, 2, st, bkey or b"", nonce)
-    ok_ack = (watch_ack_status(ack, 11, 2, key, nonce) == FR.BLOB_OK
-              and watch_ack_status(ack, 11, 1, key, nonce) == -1
-              and watch_ack_status(ack, 12, 2, key, nonce) == -1
-              and watch_ack_status(ack, 11, 2, key, bytes(12)) == -2
-              and watch_ack_status(FR.blob_ack(0, 25, 11, 2, 0, FR.blob_key("x"), nonce), 11, 2, key, nonce) == -2
-              and watch_ack_status(ack[:8] + bytes((1,)) + ack[9:], 11, 2, key, nonce) == -2
-              and watch_ack_status(FR.blob_ack(0, 25, 0x80000001, 2, 3, key, nonce), 0x80000001, 2, key, nonce) == 3
+                  and watch_ack_status(FR.blob_ack(0, 25, 12, 4, st_relabel, key, nonce, rb[0].mac if rb else None),
+                                       12, 4, key, nonce, mac12) == FR.BLOB_BAD_MAC)
+    # the bridge's signed ack, as the watch reads it: only for this nonce, batch, attempt, key and
+    # the exact bytes the watch signed (mac11, its own MAC of attempt 2)
+    mac11 = bytes(blob[-1][4:20])
+    ack = FR.blob_ack(0, 25, 11, 2, st, bkey or b"", nonce, blobs[0].mac if blobs else None)
+    ok_ack = (ack_src and watch_ack_status(ack, 11, 2, key, nonce, mac11) == FR.BLOB_OK
+              and watch_ack_status(ack, 11, 1, key, nonce, mac11) == -1
+              and watch_ack_status(ack, 12, 2, key, nonce, mac11) == -1
+              and watch_ack_status(ack, 11, 2, key, bytes(12), mac11) == -2
+              and watch_ack_status(ack, 11, 2, key, nonce, mac12) == -2
+              and watch_ack_status(FR.blob_ack(0, 25, 11, 2, 0, FR.blob_key("x"), nonce, mac11), 11, 2, key, nonce,
+                                   mac11) == -2
+              and watch_ack_status(ack[:8] + bytes((1,)) + ack[9:], 11, 2, key, nonce, mac11) == -2
+              and watch_ack_status(FR.blob_ack(0, 25, 0x80000001, 2, 3, key, nonce), 0x80000001, 2, key, nonce,
+                                   mac11) == 3
               and len(ack) == 17)
 
     # W3: the next SYNC is lost on the air; the chunk timed against it is dropped, never misdated
@@ -631,10 +667,10 @@ def test_ble_frames() -> None:
     nums = [watch_json_num(v) for v in (64.0, 63.5, 0.1, -0.00001, 12.34567)]
     ok_num = nums == ["64", "63.5", "0.1", "-0", "12.3457"] and all(json.loads(x) is not None for x in nums)
     check("ble_frames", same_types and same_uuids and labels and ok_stream and ok_blob and ok_num and ok_job
-          and ok_avg and ok_hello and ok_ack and ok_sync and ok_filter and ok_relabel,
+          and ok_avg and ok_hello and ok_ack and ok_sync and ok_filter and ok_relabel and ok_cross,
           f"types={same_types} uuids={same_uuids} labels={labels} hello={ok_hello} stream={ok_stream} "
           f"({len(samples)} samples, {len(order)} frames) blob_after_abandoned={ok_blob} ack_mac={ok_ack} "
-          f"relabel={ok_relabel} "
+          f"relabel={ok_relabel} cross_life={ok_cross} "
           f"lost_sync={ok_sync} filter={ok_filter} avg100to25={ok_avg} ({len(u100)} frames) json_job={ok_job} "
           f"json_num={nums}")
 

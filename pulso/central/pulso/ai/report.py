@@ -26,14 +26,14 @@ transcrições de reunião, commits). Regras:
 - Use apenas os fatos. Cada insight cita os ids dos fatos em que se apoia (campo evidence).
 - Todo número, toda data e todo horário que você escrever precisa aparecer em um dos fatos citados por aquele
   insight, com a mesma formatação (vírgula decimal). Vale também para contagens pequenas (2 reuniões, três
-  episódios), números por extenso (onze, vinte), números com unidade colada (4h, 25ms) e limiares. Não calcule
+  episódios), números por extenso (zero, onze, vinte), números com unidade colada (4h, 25ms) e limiares. Não calcule
   números novos, não arredonde de outro jeito, não some, não conte fatos. Datas: escreva no formato AAAA-MM-DD
   ou pelo dia da semana que o fato traz entre parênteses (quinta-feira); não deduza o dia da semana.
 - Pessoas aparecem como "Pessoa A", "Pessoa B"…; escreva exatamente assim ("Pessoa A/B" é uma de duas pessoas
   com o mesmo nome).
 - "z" é desvio em relação ao normal da própria pessoa naquele horário: 1 z é perceptível, 2 z é forte.
 - Correlação não é causa. Quando a comparação com horários equivalentes sem reunião não for significativa
-  (p ≥ 0,05 ou IC cruzando zero), diga que não dá para separar o efeito da reunião do efeito do horário.
+  (p ≥ 0,05 ou o fato diz que o IC cruza o zero), diga que não dá para separar o efeito da reunião do efeito do horário.
 - Seja direto e útil, em português do Brasil, sem tom de autoajuda. Recomendações concretas e verificáveis
   (ex.: mover a 1:1 de terça para depois do almoço), sempre ligadas a fatos.
 - Se os fatos forem poucos, diga o que falta medir em vez de inventar padrão.

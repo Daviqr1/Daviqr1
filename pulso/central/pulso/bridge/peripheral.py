@@ -8,7 +8,10 @@ Advertises one 128-bit service with:
 Every connection starts with HELLO: the watch names its key (SHA-256 of the device token) and
 sends a nonce; the bridge answers with HMAC(key, nonce). The watch writes nothing else until that
 proof checks, and every batch result is signed with the same key and nonce, so a look-alike
-peripheral can neither collect the batches nor make the watch delete them.
+peripheral can neither collect the batches nor make the watch delete them. A "stored"/"rejected"
+result also signs the MAC of the blob it judged, which the watch compares with its own: a genuine
+blob of another app life (the q space restarts with Storage) replayed under the q in flight never
+clears the batch the watch actually sent.
 
 Two kinds of traffic then arrive on DATA:
 * the live stream (raw accelerometer, battery): decoded and turned into protocol v1 batches every
@@ -17,8 +20,7 @@ Two kinds of traffic then arrive on DATA:
 * whole protocol v1 batches from the watch's upload queue (BLOB frames), when the router on the
   watch sends them here instead of through the phone. Each is checked (HMAC with the device token
   over q and the JSON, JSON schema), stored through the same sink and acknowledged, so the watch
-  only deletes a batch the central really has (or one whose own content, signed for that q, the
-  central will never accept).
+  only deletes a batch whose exact bytes the central really has (or will never accept).
 
 Runs on Linux (BlueZ), macOS and Windows through `bless`.
 """
@@ -136,7 +138,7 @@ async def serve(sink: Sink | Callable[[dict], object], device_id: str = "fr255-b
             if key is None:
                 # an unknown token must not end the session of the watch that is already in
                 notify(FR.hello_ack(last, accel_hz_hint, None, ev.nonce))
-                log("relógio na ponte com token desconhecido (crie com `pulso token create` ou confira --token)")
+                log("relógio na ponte com token desconhecido (crie com `pulso token create fr255` ou confira --token)")
                 return
             link["key"], link["nonce"] = key, ev.nonce
             notify(FR.hello_ack(last, accel_hz_hint, key, ev.nonce))
@@ -150,7 +152,9 @@ async def serve(sink: Sink | Callable[[dict], object], device_id: str = "fr255-b
             notify(FR.blob_ack(last, accel_hz_hint, ev.q, ev.attempt, FR.BLOB_RETRY, key, nonce))
             return
         st = await asyncio.to_thread(handle_blob, sink, ev.q, ev.payload, ev.mac, log)
-        notify(FR.blob_ack(last, accel_hz_hint, ev.q, ev.attempt, st, key, nonce))
+        # a verdict names the blob MAC handle_blob just verified: the watch acts on it only when
+        # that is the MAC it computed for its own batch (blob_ack signs zeros for the other statuses)
+        notify(FR.blob_ack(last, accel_hz_hint, ev.q, ev.attempt, st, key, nonce, ev.mac))
         if st == FR.BLOB_OK:
             log(f"lote {ev.q} recebido pela ponte ({len(ev.payload)} B)")
 

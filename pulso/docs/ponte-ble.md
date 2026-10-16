@@ -24,8 +24,8 @@ real é independência do celular, latência baixa e estável, e os dados chegan
 
 Implementado em `central/pulso/bridge/frames.py` (decodificador e codificador de referência) e no
 `BleLink.mc` do Pulso Captura (conferido contra o decodificador em `watch/capture/tests/check_watch_algos.py`:
-formato dos frames, HELLO e a prova, MAC do lote sobre `q`, confirmação assinada com tentativa, o filtro de
-tipos e o esquecimento do SYNC a cada HELLO).
+formato dos frames, HELLO e a prova, MAC do lote sobre `q`, confirmação assinada com tentativa e presa ao MAC
+do lote, o filtro de tipos e o esquecimento do SYNC a cada HELLO).
 
 ```
 byte 0  seq   u8 (incrementa por frame; o periférico confirma o último recebido)
@@ -53,8 +53,15 @@ ponte → relógio (característica CTRL, notify); todas começam com último_se
            prova = HMAC-SHA256(chave, "pulso-hello" | nonce)[:16]; sem prova = token desconhecido
 0xB1       último_seq | taxa | 0xB1 | q u32 | tentativa u8 | status u8 | mac 8 B      (17 B)
            status 0 gravado, 1 rejeitado, 2 assinatura, 3 reenviar
-           mac = HMAC-SHA256(chave, "pulso-ack" | nonce | q | tentativa | status)[:8]
+           mac = HMAC-SHA256(chave, "pulso-ack" | nonce | q | tentativa | status | conteúdo 16 B)[:8]
+           conteúdo = mac do BLOB_END que a ponte conferiu (status 0 e 1); 16 bytes zero (2 e 3).
+           Vai só dentro do MAC, não no frame: o relógio usa o MAC que ele mesmo calculou do lote
 ```
+
+Atualize o `.prg` e a central (ponte BLE) juntos: o formato da confirmação `0xB1` muda entre versões, e
+com versões diferentes o relógio não aceita nenhuma confirmação da ponte, mesmo de um lote que ela gravou —
+reenvia o mesmo lote e, enquanto os lotes forem pela ponte, não esvazia a fila; cheia, ela descarta os mais
+antigos.
 
 **Handshake.** Ao conectar, o relógio manda só o HELLO, com um nonce novo (`Cryptography.randomBytes`). A
 ponte procura entre os tokens ativos a chave com aquele id e responde com a prova; o relógio confere e só
@@ -67,7 +74,8 @@ chega em 60 s, o relógio refaz a conexão e o HELLO (a ponte pode ter reiniciad
 **Tentativas.** Cada envio de um lote é uma tentativa nova (`tentativa` no BLOB_START, repetida no `0xB1`).
 Um BLOB_START novo descarta em silêncio a tentativa anterior que ficou pela metade (o relógio já desistiu
 dela); `3 reenviar` só sai quando a tentativa **atual** se perde no meio (buraco no `seq`, tamanho). O
-relógio ignora qualquer `0xB1` de outra tentativa, de outro lote ou com MAC que não confere.
+relógio ignora qualquer `0xB1` de outra tentativa, de outro lote ou com MAC que não confere — inclusive um
+`0`/`1` sobre outro conteúdo.
 
 O relógio escreve o `seq` na hora da transmissão, então um buraco no `seq` é perda no ar. Depois de
 qualquer perda o decodificador ignora deltas até o próximo keyframe e aborta o lote (BLOB) em curso — ele
@@ -95,10 +103,11 @@ Os dois tipos se alternam frame a frame, uma escrita por vez. A fila do fluxo gu
 acompanha, descarta o **segundo inteiro** mais antigo (nunca um delta solto, nunca o SYNC do qual os
 seguintes dependem). Um lote só sai da fila do relógio depois de um `0xB1` assinado: `0` (gravado no
 banco ou aceito pela central remota) ou `1` (o conteúdo que o relógio assinou para aquele `q` foi recusado:
-validação local ou `400/413/422` da central). Qualquer outra resposta da central remota — `404` de proxy ou
-URL errada, `401/403` do token da ponte, `408`, `429`, `5xx`, sem conexão — vira `3 reenviar`: o lote fica
-no relógio; um JSON que diz ser de outro `q` também. MAC que não confere vira `2 assinatura`, que também
-não apaga nada.
+validação local ou `400/413/422` da central). Esses dois assinam também o MAC do lote que a ponte conferiu,
+e o relógio compara com o MAC que ele mesmo calculou: só apagam exatamente os bytes que o relógio mandou.
+Qualquer outra resposta da central remota — `404` de proxy ou URL errada, `401/403` do token da ponte,
+`408`, `429`, `5xx`, sem conexão — vira `3 reenviar`: o lote fica no relógio; um JSON que diz ser de outro
+`q` também. MAC que não confere vira `2 assinatura`, que também não apaga nada.
 
 GATT (UUIDs em `bridge/peripheral.py`):
 
@@ -128,10 +137,10 @@ mostra o estado da ponte e os erros de envio por ela. O log do
 
 Token: com `pulso notebook --ble` (ou `pulso bridge watch` sem `--central`) a ponte confere o HELLO e a
 assinatura dos lotes contra os tokens de aparelho (escopo `device`) ativos do próprio banco — um token do
-painel (`pulso token create --painel`) é só leitura e não serve para a ponte. Com `--central … --token T`,
-use **o mesmo T** configurado no relógio — senão o handshake falha: os detalhes mostram `ble token` e,
-quando a ponte é o único caminho, a tela principal mostra “ponte: token inválido” (a URL pode vir com ou
-sem `/v1` ou `/v1/ingest`). Sem token no relógio a ponte não conecta.
+painel (`pulso token create painel --painel`) é só leitura e não serve para a ponte. Com
+`--central … --token T`, use **o mesmo T** configurado no relógio — senão o handshake falha: os detalhes
+mostram `ble token` e, quando a ponte é o único caminho, a tela principal mostra “ponte: token inválido” (a
+URL pode vir com ou sem `/v1` ou `/v1/ingest`). Sem token no relógio a ponte não conecta.
 
 ESP32 (fase 2, sem notebook ligado): o mesmo GATT com NimBLE-Arduino 2.x, encaminhando os frames por
 Wi-Fi para `POST /v1/ingest` depois de decodificar (ou mandando os frames crus para um endpoint que use
@@ -163,9 +172,13 @@ público. O que protege:
   não recebe lote nem fluxo, e o relógio vai procurar outro.
 - **O que apaga** (ponte → relógio): todo `0xB1` é assinado com a chave e o nonce daquela conexão e nomeia a
   tentativa; o relógio só apaga um lote com `0xB1` que confere. Sem a chave não dá para forjar “gravado”.
-  E a ponte só assina `0` ou `1` para o lote `q` quando recebeu o conteúdo que o próprio relógio assinou
-  como `q`: o MAC do lote cobre o `q`, então quem escreve em DATA e repete um lote verdadeiro capturado no
+  E a ponte só assina `0` ou `1` para o lote `q` quando recebeu um conteúdo assinado como `q` com um token de
+  aparelho: o MAC do lote cobre o `q`, então quem escreve em DATA e repete um lote verdadeiro capturado no
   ar (válido, mas de outro `q`) sob o `q` do lote em voo recebe `2 assinatura` — nada é gravado nem apagado.
+  O `0`/`1` assina ainda o MAC do lote julgado, que o relógio confere contra o seu: o `q` recomeça quando o
+  app é reinstalado (e um segundo relógio pode usar o mesmo token), então um lote verdadeiro de outra “vida”
+  repetido sob o `q` e a tentativa em voo é gravado com o próprio `d` (é um lote legítimo), mas a
+  confirmação dele não confere no relógio, que mantém o seu lote, refaz o HELLO e reenvia.
 - **O que grava** (relógio → ponte): cada lote leva HMAC-SHA256 com chave = SHA-256 do token, sobre o rótulo
   `pulso-blob`, o `q` e o JSON, conferido antes de gravar. A central já guarda exatamente esse SHA-256 de
   cada token (nunca o token), então a ponte local não precisa de segredo próprio; token revogado deixa de
@@ -183,14 +196,16 @@ O que **não** está coberto:
 - Negação de serviço: quem está no alcance pode embaralhar o `seq` (forçando reenvios), mandar HELLO com
   outro nonce (as confirmações daquela conexão deixam de conferir e o relógio refaz o HELLO; a ponte
   esquece o SYNC e perde até 10 s de bruto), injetar um lote com assinatura errada (o relógio recebe
-  `2 assinatura` e espera como num erro de token antes de tentar de novo) ou anunciar o UUID com sinal mais
-  forte. Nada disso apaga ou altera dado — o lote espera na fila. A ponte usa um decodificador só para
-  todos os que escrevem em DATA (o `bless` não diz quem escreveu).
+  `2 assinatura` e espera como num erro de token antes de tentar de novo), repetir sob o `q` em voo um lote
+  verdadeiro de outra instalação com o mesmo token (a confirmação não confere e o relógio refaz o HELLO) ou
+  anunciar o UUID com sinal mais forte. Nada disso apaga ou altera dado — o lote espera na fila. A ponte
+  usa um decodificador só para todos os que escrevem em DATA (o `bless` não diz quem escreveu).
 - Leitura: os lotes não são cifrados. Quem escuta o rádio lê o JSON dos lotes que passam (e pode
-  repeti-los — repetido sob o mesmo `q`, a central deduplica; sob outro `q`, o MAC não confere). Um
-  atacante perto do relógio **e** da ponte ligada ao mesmo tempo pode ainda repassar o HELLO para a ponte
-  verdadeira (*relay*) e segurar os lotes. Nenhum dos dois consegue fazer o relógio apagar um lote que a
-  ponte não gravou, nem fazer a ponte gravar um lote que o relógio não assinou.
+  repeti-los — repetido sob o mesmo `q`, a central deduplica pelo `d` e `q` do próprio lote; sob outro `q`,
+  o MAC não confere). Um atacante perto do relógio **e** da ponte ligada ao mesmo tempo pode ainda repassar
+  o HELLO para a ponte verdadeira (*relay*) e segurar os lotes. Nenhum dos dois consegue fazer o relógio
+  apagar um lote sem que a ponte tenha gravado — ou recusado por conteúdo (`1`) — exatamente os bytes que
+  o relógio assinou para aquele `q`, nem fazer a ponte gravar um lote que não foi assinado com o token.
 - Próximos passos se quiser fechar isso também: bonding (`Device.requestBond`, suportado no FR255) e/ou
   cifrar o lote (AES no `Cryptography.Cipher`) — a testar com BlueZ/NimBLE e no orçamento de watchdog.
 

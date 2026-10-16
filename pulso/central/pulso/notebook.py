@@ -64,21 +64,29 @@ def _start_tunnel(kind: str, port: int) -> tuple[Callable[[], None] | None, str 
         if not exe:
             print("tailscale não encontrado (https://tailscale.com/download)")
             return None, None
-        if subprocess.run([exe, "funnel", "--bg", str(port)], check=False).returncode != 0:
-            return None, None  # nothing was set up, so nothing to undo (and never remove a config we did not make)
-        st = subprocess.run([exe, "funnel", "status"], capture_output=True, text=True).stdout
-        m = re.search(r"https://[^\s]+\.ts\.net", st)
 
         def stop() -> None:
             try:
+                # stdin may be a hung-up terminal; its own session keeps a terminal Ctrl+C/hangup off it
+                # Windows ignores start_new_session; a new process group there has Ctrl+C disabled
+                kw = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if sys.platform == "win32"
+                      else {"start_new_session": True})
                 r = subprocess.run([exe, *TAILSCALE_OFF], stdin=subprocess.DEVNULL, capture_output=True,
-                                   text=True, timeout=30)  # stdin may be a hung-up terminal
+                                   text=True, timeout=30, **kw)
                 err = r.stderr.strip() if r.returncode != 0 else None
-            except (OSError, subprocess.SubprocessError) as e:
+            except BaseException as e:  # whatever cut it short, say how to finish it by hand
                 err = repr(e)
             if err is not None:
                 print(f"não consegui desligar o Funnel: rode `tailscale {' '.join(TAILSCALE_OFF)}`\n{err}", file=sys.stderr)
 
+        if subprocess.run([exe, "funnel", "--bg", str(port)], check=False).returncode != 0:
+            return None, None  # nothing was set up, so nothing to undo (and never remove a config we did not make)
+        try:
+            st = subprocess.run([exe, "funnel", "status"], capture_output=True, text=True).stdout
+        except BaseException:  # Ctrl+C/kill before the caller holds `stop`: the Funnel is up, undo it here
+            _shielded(stop)
+            raise
+        m = re.search(r"https://[^\s]+\.ts\.net", st)
         return stop, m.group(0) if m else None
     return None, None
 
@@ -87,6 +95,23 @@ def _sigterm(signum, frame) -> None:
     # `kill`/systemd stop, or SIGHUP when the terminal closes or SSH drops: run the same cleanup as
     # Ctrl+C (close the tunnel) instead of dying with the `--bg` Funnel still public
     raise KeyboardInterrupt
+
+
+def _shielded(cleanup: Callable[[], None]) -> None:
+    """Run `cleanup` with Ctrl+C, SIGTERM and SIGHUP ignored (main thread only): a second Ctrl+C or kill
+    must not cut short the command that closes the Funnel and leave it public. stop()'s 30 s timeout
+    bounds the wait; the handlers go back as they were."""
+    if threading.current_thread() is not threading.main_thread():
+        cleanup()
+        return
+    sigs = [signal.SIGINT, signal.SIGTERM, *([signal.SIGHUP] if hasattr(signal, "SIGHUP") else [])]
+    held = {s: signal.signal(s, signal.SIG_IGN) for s in sigs}
+    try:
+        cleanup()
+    finally:
+        for s, h in held.items():
+            if h is not None:
+                signal.signal(s, h)
 
 
 def _exit_signals() -> list[signal.Signals]:
@@ -114,7 +139,7 @@ def run(settings: config.Settings, host: str = "127.0.0.1", port: int = 8080, br
         print("encerrando", file=sys.stderr)
     finally:
         if stop_tunnel is not None:
-            stop_tunnel()
+            _shielded(stop_tunnel)
         for s, h in prev.items():
             signal.signal(s, h)
 

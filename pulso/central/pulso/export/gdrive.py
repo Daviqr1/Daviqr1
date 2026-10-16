@@ -19,6 +19,7 @@ import io
 import json
 import os
 import re
+import tempfile
 from pathlib import Path
 
 from pulso import config
@@ -129,10 +130,25 @@ def credentials(interactive: bool = False):
 
         flow = InstalledAppFlow.from_client_secrets_file(str(client), scopes())
         creds = flow.run_local_server(port=0, timeout_seconds=300)
-    token.parent.mkdir(parents=True, exist_ok=True)
-    token.write_text(creds.to_json(), encoding="utf-8")
-    os.chmod(token, 0o600)
+    _write_private(token, creds.to_json())
     return creds
+
+
+def _write_private(path: Path, text: str) -> None:
+    """Replace `path` with `text`, readable only by you at every instant: the temp file is created 0600
+    (mkstemp) next to it and renamed over it, so a reader (the ingest thread pushing a Calendar alert)
+    never sees a half-written token and PULSO_GDRIVE_TOKEN outside the 0700 PULSO_HOME is safe too."""
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 def service(interactive: bool = False):

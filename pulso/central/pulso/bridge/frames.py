@@ -30,15 +30,21 @@ Peripheral -> watch notifications (CTRL characteristic), all starting with last_
     plain       last_seq | hint                                           every 10 frames
     0xB2        last_seq | hint | 0xB2 | proof[16]                        answer to HELLO
                 proof = HMAC-SHA256(key, "pulso-hello" | nonce)[:16]; no proof = unknown token
-    0xB1        last_seq | hint | 0xB1 | q u32 | attempt u8 | status u8 | mac[8]   blob result
+    0xB1        last_seq | hint | 0xB1 | q u32 | attempt u8 | status u8 | mac[8]   blob result (17 B)
                 status 0 stored, 1 rejected, 2 bad MAC, 3 retry;
-                mac = HMAC-SHA256(key, "pulso-ack" | nonce | q u32 | attempt u8 | status u8)[:8]
+                mac = HMAC-SHA256(key, "pulso-ack" | nonce | q u32 | attempt u8 | status u8 | subject[16])[:8]
+                subject = the blob MAC the verdict is about (status 0 and 1, which make the watch delete
+                the batch), 16 zero bytes otherwise; it is signed, never sent
 
 The watch writes nothing but HELLO until the proof checks, and ignores any 0xB1 whose attempt or
 mac does not match the batch in flight, so a look-alike peripheral neither receives batches nor
 makes the watch delete them. The blob MAC covers q: anyone can write to DATA, and a genuine blob
 replayed under the q of another batch must fail the MAC (never earn a signed "rejected" for it).
-The three MACs use distinct labels, so none of them can stand in for another.
+The ack signs the blob MAC too, and the watch checks it against the MAC it computed itself: the q
+space restarts with the app's Storage (and a second watch may share the token), so a genuine blob
+of another life replayed under the q/attempt in flight earns a verdict about other bytes, which
+the watch never acts on. "Stored" and "rejected" thus only ever clear the exact content the watch
+signed. The three MACs use distinct labels, so none of them can stand in for another.
 
 A delta beyond ±127 mG forces a new ACC_KEY, so decoding never accumulates error. The watch writes
 the seq at transmission time, so a gap means frames lost on the air: the decoder then waits for the
@@ -65,6 +71,7 @@ ACK_MAC_LEN = 8
 BLOB_ACK = 0xB1
 HELLO_ACK = 0xB2
 BLOB_OK, BLOB_REJECTED, BLOB_BAD_MAC, BLOB_RETRY = range(4)
+VERDICTS = frozenset((BLOB_OK, BLOB_REJECTED))   # the statuses that make the watch delete the batch
 MAX_BLOB = 65535
 
 
@@ -93,8 +100,18 @@ def hello_proof(key: bytes, nonce: bytes) -> bytes:
     return hmac.new(key, b"pulso-hello" + nonce, hashlib.sha256).digest()[:MAC_LEN]
 
 
-def ack_mac(key: bytes, nonce: bytes, q: int, attempt: int, status: int) -> bytes:
-    msg = b"pulso-ack" + nonce + struct.pack("<IBB", q & 0xFFFFFFFF, attempt & 0xFF, status & 0xFF)
+def ack_mac(key: bytes, nonce: bytes, q: int, attempt: int, status: int, blob_mac: bytes | None = None) -> bytes:
+    """MAC of a 0xB1 ack. A verdict (VERDICTS) also signs the MAC of the blob it is about, so it can
+    only clear the batch whose exact bytes the watch signed; the other statuses judge no content and
+    sign 16 zero bytes in its place."""
+    status &= 0xFF
+    if status in VERDICTS:
+        if blob_mac is None or len(blob_mac) != MAC_LEN:
+            raise ValueError("a stored/rejected ack must name the blob MAC it is about")
+        subject = bytes(blob_mac)
+    else:
+        subject = bytes(MAC_LEN)
+    msg = b"pulso-ack" + nonce + struct.pack("<IBB", q & 0xFFFFFFFF, attempt & 0xFF, status) + subject
     return hmac.new(key, msg, hashlib.sha256).digest()[:ACK_MAC_LEN]
 
 
@@ -104,21 +121,24 @@ def hello_ack(last_seq: int, hint: int, key: bytes | None, nonce: bytes) -> byte
     return head + (hello_proof(key, nonce) if key is not None else b"")
 
 
-def blob_ack(last_seq: int, hint: int, q: int, attempt: int, status: int, key: bytes, nonce: bytes) -> bytes:
+def blob_ack(last_seq: int, hint: int, q: int, attempt: int, status: int, key: bytes, nonce: bytes,
+             blob_mac: bytes | None = None) -> bytes:
+    """`blob_mac`: the MAC (from BLOB_END) of the blob the bridge verified, required for a verdict."""
     return (bytes((last_seq & 0xFF, hint & 0xFF, BLOB_ACK))
             + struct.pack("<IBB", q & 0xFFFFFFFF, attempt & 0xFF, status)
-            + ack_mac(key, nonce, q, attempt, status))
+            + ack_mac(key, nonce, q, attempt, status, blob_mac))
 
 
-def read_ack(value: bytes, key: bytes, nonce: bytes, q: int, attempt: int) -> int | None:
+def read_ack(value: bytes, key: bytes, nonce: bytes, q: int, attempt: int, blob_mac: bytes) -> int | None:
     """Watch side (reference for BleLink.onCharacteristicChanged): the status of a 0xB1 ack for
-    batch q / attempt, or None when it is for another attempt or its MAC does not check."""
+    batch q / attempt, whose blob the watch signed as `blob_mac`, or None when it is for another
+    attempt or its MAC does not check (a verdict about other content never does)."""
     if len(value) < 17 or value[2] != BLOB_ACK:
         return None
     aq, aa, st = struct.unpack("<IBB", value[3:9])
     if aq != q & 0xFFFFFFFF or aa != attempt & 0xFF:
         return None
-    return st if hmac.compare_digest(value[9:17], ack_mac(key, nonce, aq, aa, st)) else None
+    return st if hmac.compare_digest(value[9:17], ack_mac(key, nonce, aq, aa, st, blob_mac)) else None
 
 
 def _u24(b: bytes) -> int:

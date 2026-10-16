@@ -15,7 +15,7 @@ import sqlite3
 from datetime import date
 
 from pulso import analysis, config, store
-from pulso.ai.names import me_aliases  # shared with the report/export pseudonyms
+from pulso.ai.names import is_me, me_aliases  # shared with the report/export pseudonyms
 from pulso.importers.transcripts import segments_for
 
 TAGS = [
@@ -64,7 +64,7 @@ def pseudonymise(segs: list[dict]) -> tuple[list[str], dict[str, str]]:
     lines = []
     for s in segs:
         spk = (s.get("speaker") or "").strip() or "?"
-        if spk.lower() in me or spk.lower().split()[0] in me:
+        if is_me(spk, me):  # the whole name: "Davi Costa" is not you because PULSO_ME has "davi"
             alias = "EU"
         else:
             alias = mapping.setdefault(spk, f"S{len(mapping) + 1}")

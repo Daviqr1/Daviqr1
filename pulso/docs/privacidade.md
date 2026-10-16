@@ -19,9 +19,9 @@ convidado só com e-mail de uma palavra (como `carla@…`), **não** é reconhec
 | Destino | Quando | Condição | O que vai |
 |---|---|---|---|
 | **API do Claude** (Anthropic) | uma vez por dia, entre 06:30 e 12:00 (relatório de ontem) e, às segundas, o semanal | `ANTHROPIC_API_KEY` definida **ou** a pasta `~/.config/anthropic` existir (perfil do `ant auth login`, mesmo que criado para outra coisa) | os fatos do relatório: números já calculados (ativação, episódios, sono, HRV, reuniões, commits), datas, dias da semana, horários, títulos de eventos e etiquetas de trechos. Nomes reconhecidos viram **Pessoa A, B…** antes do envio (veja acima o que não é reconhecido). Nunca séries cruas nem texto de transcrição |
-| **Google Drive** (3 Google Docs “Pulso · Saúde”, no seu Drive, não compartilhados) | os três Docs uma vez por dia, a partir das 06:45 (ou ao iniciar, se ainda não saíram hoje); fora isso, só o “Hoje”, ao iniciar e a cada 2 h, dia e noite | existir o login do Google (`~/.pulso/google-token.json`, criado por `pulso export --login`) | resumo diário e semanal: ativação, episódios com o evento coincidente, sono, HRV, débito, próximos compromissos (hora e título), alertas das últimas 48 h, tabela dos últimos 7/60 dias, análise de reuniões e o último relatório. Nomes reconhecidos viram **Pessoa A, B…** em todo o documento (veja acima o que não é reconhecido). O Gemini Notebook e o app Gemini leem esses Docs se você os adicionar como fonte |
+| **Google Drive** (3 Google Docs “Pulso · Saúde”, no seu Drive, não compartilhados) | os três Docs uma vez por dia, a partir das 06:45 (ou ao iniciar, se ainda não saíram hoje); fora isso, só o “Hoje”, ao iniciar e a cada 2 h, dia e noite | existir o login do Google (`~/.pulso/google-token.json`, no Docker `/data/google-token.json`, criado por `pulso export --login`) | resumo diário e semanal: ativação, episódios com o evento coincidente, sono, HRV, débito, próximos compromissos (hora e título), alertas das últimas 48 h, tabela dos últimos 7/60 dias, análise de reuniões e o último relatório. Nomes reconhecidos viram **Pessoa A, B…** em todo o documento (veja acima o que não é reconhecido). O Gemini Notebook e o app Gemini leem esses Docs se você os adicionar como fonte |
 | **Google Agenda** (sua agenda principal) | na hora de cada alerta, por quem o disparou: os jobs (a cada 5 min) ou o servidor de ingestão (`pulso serve`, serviço `api`), quando um envio do relógio dispara o alerta | `PULSO_GCAL_ALERTS=1` **e** o login do Google | um evento privado por alerta: “⚠ Pulso: <texto do alerta>” e o detalhe. **Não é pseudonimizado**: o alerta de reunião traz o título da reunião como está na sua agenda |
-| **Garmin Connect** | ao iniciar, a cada 6 h e, das 05:00 às 12:00, de hora em hora enquanto a noite passada não chegou | `GARMIN_EMAIL` definido ou tokens em `~/.garminconnect` | login na sua conta para **baixar** os seus dados; nada do Pulso é enviado |
+| **Garmin Connect** | ao iniciar, a cada 6 h e, das 05:00 às 12:00, de hora em hora enquanto a noite passada não chegou | `GARMIN_EMAIL` definido ou tokens em `~/.garminconnect` (ou em `$PULSO_GARMIN_TOKENS`; no Docker, `/data/garminconnect`) | login na sua conta para **baixar** os seus dados; nada do Pulso é enviado |
 
 Para não enviar nada sozinho: rode `pulso notebook --no-jobs` sem `PULSO_GCAL_ALERTS=1` (sem jobs não há
 relatório, Docs nem Garmin; o alerta no Agenda também sai do servidor de ingestão), ou rode a central
@@ -59,12 +59,20 @@ na borda da Cloudflare, que vê as requisições decifradas. A ponte BLE (`--ble
   `1-1-souza`) e com qualquer apóstrofo (D'Ávila, D’Ávila); no meio de uma frase, o sobrenome sozinho só
   conta com maiúscula (“dias” e “costa” também são palavras comuns). Duas pessoas com o mesmo primeiro
   nome não se confundem (“Ana” sozinha vira “Pessoa A/B”). Seus próprios nomes (`PULSO_ME`) ficam como
-  estão. O relatório volta com os nomes reais **só na sua máquina** e no relógio.
+  estão, mas só o nome inteiro conta: coloque em `PULSO_ME` também o seu nome completo como a agenda e
+  as transcrições o escrevem (`PULSO_ME=eu,davi,davi becam`). Um colega que só tem o mesmo primeiro nome
+  (“Davi Costa”) vira Pessoa como qualquer outro; só o primeiro nome sozinho (“Davi”) fica, porque pode
+  ser você. Sem o nome completo na lista, o seu próprio nome vira Pessoa também (nada vaza, só fica
+  menos legível). O relatório volta com os nomes reais **só na sua máquina** e no relógio.
 - **Nomes pseudonimizados no tagger**: antes de enviar, cada falante vira `S1`, `S2`… e você vira `EU`;
   o mapa fica local. O **texto** dos trechos ainda é enviado — se alguém citar nomes, eles vão junto.
 - **Relatório só com fatos verificados**: o modelo recebe números e rótulos já calculados, nunca as séries
-  cruas, e todo número (também por extenso, como “onze”), data, dia da semana e horário da resposta precisa
-  estar nos fatos que ela cita.
+  cruas, e todo número (também por extenso, como “zero”, “onze”, “duzentos” ou “dois mil e quinhentos”),
+  data, dia da semana (“segunda-feira” ou “segunda feira”) e horário (também “meio-dia” e “meia-noite”) da
+  resposta precisa estar nos fatos que ela cita. Ficam de fora “um”/“uma” e “segunda” sem “feira” (também
+  artigo e ordinal), frações, proporções, ordinais e coletivos por extenso (“meia hora”, “metade”, “o dobro”,
+  “terceira noite”, “dúzia”, “dezena”, “centena”, “milhão”) e o “zero” de “o IC cruza o zero” (um veredito,
+  não um valor).
 - **Tokens com hash**: a central guarda só o SHA-256 dos tokens de aparelho.
 - **Sem telemetria**: além do que está nas tabelas acima, nada é enviado para terceiros.
 
@@ -83,6 +91,7 @@ na borda da Cloudflare, que vê as requisições decifradas. A ponte BLE (`--ble
 4. **Google (Drive, Gemini, Agenda)**: os Docs e eventos ficam na sua conta e seguem a política dela; veja
    em `docs/gemini-notebook.md` o que o Gemini guarda e decida quanto detalhe de saúde quer lá.
 5. Use disco criptografado no servidor e backup criptografado.
-6. A biblioteca do Garmin Connect guarda tokens da sua conta em `~/.garminconnect` — trate como senha.
+6. A biblioteca do Garmin Connect guarda tokens da sua conta em `~/.garminconnect` (no Docker,
+   `/data/garminconnect`, no volume `pulso-data`, junto do banco) — trate como senha.
 7. Os resultados são **para você** entender padrões, não diagnóstico. Sinais persistentes (palpitação,
    insônia crônica, estresse incapacitante) são assunto para médico.

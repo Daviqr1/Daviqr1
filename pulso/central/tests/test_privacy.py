@@ -1,6 +1,7 @@
 """Colleagues' names: what reaches Claude (report) and Google (Docs export) is pseudonymised."""
 
 import json
+import re
 from datetime import date
 
 import pytest
@@ -160,3 +161,89 @@ def test_docs_keep_the_time_zone_with_a_colleague_named_paulo(conn):
         assert "Paulo" not in d.markdown.replace("(America/Sao_Paulo)", ""), d.key
     assert all("Pessoa" not in line for line in summary.build(conn, TZ, today=DAY, days=1).splitlines()
                if line.startswith("Atualizado em:"))
+
+
+def test_a_colleague_sharing_your_first_name_is_still_pseudonymised(conn, monkeypatch):
+    """Only a WHOLE PULSO_ME alias is you: "Davi Costa" is a colleague even with "davi" in the list."""
+    from pulso.ai import names, tagger
+
+    monkeypatch.setenv("PULSO_ME", "eu,davi,gabi,davi becam")
+    store.upsert_event(conn, Event("c4", "calendar", 0, MIN, "1:1 Davi Costa", "ics",
+                                   {"attendees": ["Davi Costa", "Gabi Martins", "Davi Becam"]}))
+    T = Pseudonyms(conn)
+    assert "Costa" not in T("1:1 Davi Costa") and T("1:1 Davi Costa").startswith("1:1 Pessoa ")
+    assert "Martins" not in T("Revisão com Gabi Martins") and "Costa" not in T("Costa pediu o relatório")
+    assert T("Davi Becam") == "Davi Becam" and T("Becam e Davi") == "Becam e Davi"   # you, listed in full
+    assert T("Davi apresentou") == "Davi apresentou"                                 # the bare alias stays
+    assert names.is_me("DAVI  BÉCAM") and names.is_me("Davi") and not names.is_me("Davi Costa") and not names.is_me("?")
+    _, back = tagger.pseudonymise([{"idx": 0, "speaker": "Davi Costa", "text": "x"},
+                                   {"idx": 1, "speaker": "Davi Becam", "text": "y"},
+                                   {"idx": 2, "speaker": "davi", "text": "z"}])
+    assert back == {"S1": "Davi Costa"}                                              # only you are EU
+    text = "\n".join(d.markdown for d in summary.documents(conn, TZ, today=DAY, days=1))
+    assert "Costa" not in text and "Martins" not in text
+    # without your full name in the list, your own name is pseudonymised too: nothing leaks
+    monkeypatch.setenv("PULSO_ME", "eu,davi")
+    assert "Becam" not in Pseudonyms(conn)("1:1 Davi Becam")
+
+
+def test_pseudonymising_twice_changes_nothing_with_a_colleague_surnamed_pessoa(conn):
+    """summary._final runs T over text that already has pseudonyms: "Pessoa A" must not become
+    "Pessoa B A" because Carlos Pessoa is now a person."""
+    store.upsert_event(conn, Event("c5", "calendar", 0, MIN, "kickoff", "ics", {"attendees": ["Carlos Pessoa"]}))
+    T = Pseudonyms(conn)
+    carlos = T("Carlos Pessoa")
+    assert carlos.startswith("Pessoa ") and T("Pessoa pediu o prazo") == f"{carlos} pediu o prazo"
+    for x in ("1:1 Ana Souza", "Revisão com Ana Lima e Ana Souza", "Ana confirmou", "Carlos Pessoa e Pessoa",
+              "Pessoas aparecem como “Pessoa A, B…”", "1-1-ana-souza", "Pessoa pediu; Ana Souza respondeu"):
+        once = T(x)
+        assert T(once, final=True) == once, (x, once, T(once, final=True))
+    assert T("uma pessoa a mais") == "uma pessoa a mais"
+    docs = summary.documents(conn, TZ, today=DAY, days=1)
+    for d in docs:
+        assert "Pessoas aparecem como “Pessoa A, B…”" in d.markdown, d.key
+        assert not re.search(r"Pessoa [A-Z]\d* [A-Z]\b", d.markdown), d.key
+
+
+def test_what_looks_like_a_pseudonym_inside_a_name_is_still_the_name(conn):
+    """"Pessoa D" in "Lia Pessoa D'Ávila" (an inner apostrophe does not end a word) or in "Caio Pessoa
+    D. Lima" is part of a name, not a pseudonym to keep: the rest of the name must neither leak nor go
+    to someone else, and T(T(x)) == T(x) still holds."""
+    store.upsert_event(conn, Event("c7", "calendar", 0, MIN, "kickoff", "ics", {"attendees": [
+        "Lia Pessoa D'Ávila", "Rui Pessoa O’Neill", "Caio Pessoa D. Lima", "Carlos Pessoa", "Bia d'Ávila"]}))
+    T = Pseudonyms(conn)
+    for x, name in (("1:1 Lia Pessoa D'Ávila", "Ávila"), ("Revisão com Rui Pessoa O’Neill", "Neill"),
+                    ("d'Ávila confirmou", "Ávila"), ("Caio Pessoa D. Lima chegou", "Lima"),
+                    ("pessoa d’Souza", "Souza"), ("dell'Ana", "Ana")):   # was "Pessoa D’Pessoa B" the 2nd time
+        once = T(x)
+        assert name not in once and T(once, final=True) == once, (x, once, T(once, final=True))
+    assert T("1:1 Lia Pessoa D'Ávila") == "1:1 " + T("Lia Pessoa D'Ávila")
+    assert T("Revisão com Rui Pessoa O’Neill") == "Revisão com " + T("Rui Pessoa O’Neill")
+    assert T("Caio Pessoa D. Lima chegou") == T("Caio Pessoa D. Lima") + " chegou"   # not "Pessoa B Pessoa D. Pessoa B"
+    assert T("Ana Souza's notes") == T("Ana Souza") + "'s notes"                     # a possessive still ends the word
+    assert T(T("Ana Souza's notes"), final=True) == T("Ana Souza's notes")
+    for x, name in (("Ana'll present", "Ana"), ("Souza'd come", "Souza"), ("Ana’ve", "Ana")):  # clitics end a name too
+        assert name not in T(x), (x, T(x))
+    assert T("d'ávila") == "d'ávila"                                                 # lowercase, like "dias"
+
+
+def test_attendee_with_an_uppercase_mailto_scheme_is_recognised(conn):
+    store.upsert_event(conn, Event("c6", "calendar", 0, MIN, "sync", "ics",
+                                   {"attendees": ["MAILTO:rafael.reis@x.com", "Mailto:Bia.Nunes@x.com"]}))
+    T = Pseudonyms(conn)
+    for text in ("sync com Rafael Reis", "Bia Nunes entrou"):   # like any e-mail-only attendee: the full name
+        out = T(text)
+        assert not any(n in out for n in ("Rafael", "Reis", "Bia", "Nunes", "MAILTO")), out
+
+
+def test_raw_fields_never_keep_a_pessoa_that_is_a_name(conn, monkeypatch):
+    """Only T's own output (final=True) keeps "Pessoa X": in a raw calendar title, "Zé Pessoa E" or
+    "Davi Pessoa" (first name = a PULSO_ME alias) is a colleague, not a pseudonym."""
+    monkeypatch.setenv("PULSO_ME", "eu,davi")
+    store.upsert_event(conn, Event("c8", "calendar", 0, MIN, "kickoff", "ics", {"attendees": [
+        "Zé Pessoa", "Davi Pessoa", "Lu Pessoa Ramos", "Ana Souza"]}))
+    T = Pseudonyms(conn)
+    for x, leak in (("Zé Pessoa E Ana Souza", "Zé"), ("Davi Pessoa E Gabi", "Davi Pessoa"), ("Lu Pessoa R", "Lu")):
+        once = T(x)
+        assert leak not in once, (x, once)
+        assert T(once, final=True) == once, (x, once)

@@ -95,6 +95,21 @@ def adversarial_book():
     "Quinze minutos acima de 1,5 z.",
     "Trinta e seis minutos acima de 1,5 z.",        # 36, not 30 and 6
     "Cem minutos acima de 1,5 z.",
+    "Na segunda feira você dormiu 6,5 h.",          # no hyphen: still a weekday (2026-10-15 is a Thursday)
+    "Na terça  feira a HRV foi 42 ms.",
+    "Duzentos minutos de débito.",                  # hundreds and thousands in words
+    "Trezentas noites com 6,5 h.",
+    "Mil passos a mais.",
+    "Dois mil e quinhentos passos.",
+    "Cento e vinte minutos acima de 1,5 z.",
+    "O pico veio ao meio-dia.",                     # clock hours in words
+    "Acordou à meia-noite.",
+    "Dormiu às meia noite e meia.",
+    "Zero episódios acima de 1,5 z.",               # a false count in words
+    "ſete episódios.",                              # IGNORECASE reads these as "sete", "mil", "segunda",
+    "MİL passos a mais.",                           # "setembro": rejected, never a KeyError
+    "Na ſegunda-feira você dormiu 6,5 h.",
+    "Em 15 de ſetembro você dormiu 6,5 h.",
 ])
 def test_gate_rejects_units_dates_and_small_counts(adversarial_book, text):
     book, ids = adversarial_book
@@ -111,6 +126,42 @@ def test_gate_rejects_units_dates_and_small_counts(adversarial_book, text):
 def test_gate_keeps_legit_formatting_when_in_the_facts(adversarial_book, text):
     book, ids = adversarial_book
     assert F.gate(text, ids, book) == [], text
+
+
+def test_gate_reads_number_words_as_one_value():
+    book = F.FactBook()
+    f = book.add("passos", "2026-10-12 (segunda-feira): 2500 passos, 250 min de pé, 125 min sentado, pico às 12:10.")
+    for ok in ("Dois mil e quinhentos passos.", "Duzentos e cinquenta minutos de pé.", "Cento e vinte e cinco minutos.",
+               "Na segunda feira, pico perto do meio-dia.", "Segunda-feira: 2500 passos.", "125 por cento."):
+        assert F.gate(ok, [f], book) == [], ok
+    for bad in ("Dois mil passos.", "Quinhentos passos.", "Duzentos minutos de pé.", "Cento e vinte minutos.",
+                "Pico à meia-noite.", "Na terça feira, 2500 passos."):
+        assert F.gate(bad, [f], book), bad
+    assert F.extract_numbers("dois e três, mil e uma, um passo") == [2.0, 3.0, 1001.0]   # "um" alone is an article
+
+
+def test_gate_zero_and_unreadable_words_in_the_facts():
+    book = F.FactBook()
+    cod = book.add("código", "0 commits no período, 0 entre 22h e 5h.")
+    assert F.gate("Zero commits no período.", [cod], book) == []
+    vc = book.add("reuniões", f"reuniões vs. mesmos horários sem reunião (4 reuniões): diferença 0,12 z, {F._ci95(-0.1, 0.34)}, p = 0,410.")
+    assert "IC95 -0,10 a 0,34, cruza o zero" in book.by_id()[vc].text and "não cruza" in F._ci95(0.05, 0.4)
+    assert F.gate("O IC cruza o zero: não dá para separar a reunião do horário.", [vc], book) == []
+    # the verdict adds no 0 to the fact: an integer 0 / "zero" cannot stand for 0,12 z
+    assert 0.0 not in book.by_id()[vc].numbers
+    for bad in ("A diferença foi de 0 z.", "Diferença zero entre reunião e controle.", "Foram 0 reuniões."):
+        assert F.gate(bad, [vc], book), bad
+    assert F.gate("O IC não cruza o zero.", [vc], book) == []
+    assert F._ci95(None, 0.4) == "IC95 — a 0,40"
+    # a meeting title the patterns match but cannot read adds nothing to the fact, and checking against it
+    # does not raise (a NaN left in the pool would reach round())
+    odd = book.add("reunião", 'reunião "ſete MİL ſegunda-feira 15 de ſetembro" em 2026-10-15 (quinta-feira) às 10:00: durante 0,80 z.')
+    fact = book.by_id()[odd]
+    assert fact.numbers == [0.8] and fact.dates == ["2026-10-15"] and fact.weekdays == [3]
+    assert fact.times == ["10:00"]                       # "às 10:00: durante" is a time, not 10 and 0
+    assert F.gate("Pesou 0,80 z na quinta-feira às 10:00.", [odd], book) == []
+    assert F.gate("Foram 10 reuniões.", [odd], book)
+    assert F.gate("Pesou 1 z.", [odd], book) and F.gate("ſete vezes.", [odd], book)
 
 
 def test_gate_checks_against_the_cited_facts_only(adversarial_book):
@@ -255,26 +306,56 @@ def test_report_facts_never_reuse_a_summary_from_earlier_in_the_day():
     assert store.get_artefact(conn, "meetings:summary", f"{d}..{d}")["n_meetings"] == 8
 
 
-def test_mcp_meetings_recompute_a_summary_stored_before_the_period_ended():
+def test_mcp_meetings_never_serve_a_stored_summary():
+    """A summary stored earlier in the period misses the later meetings, and one stored after it misses
+    transcripts or backlogs imported since: `reunioes` always recomputes, `recalcular` or not."""
     pytest.importorskip("mcp")
     from pulso import mcp_server
 
     conn = store.connect(":memory:")
     d = date(2026, 10, 7)
     a, b = analysis.local_day_bounds(d, TZ)
+    store.upsert_samples(conn, M.AROUSAL_Z, M.DERIVED, [(a + i * MIN, 0.3) for i in range((b - a) // MIN)])
     store.upsert_event(conn, Event("m1", "meeting", a + 9 * 60 * MIN, a + 10 * 60 * MIN, "reunião", "t", {}))
     stale = {"n_meetings": 0, "vs_matched_controls": {"n": 0}, "marca": "antigo"}
     store.put_artefact(conn, "meetings:summary", f"{d}..{d}", stale)
     conn.execute("UPDATE artefacts SET created_ms = ? WHERE kind = 'meetings:summary'", (a + 8 * 60 * MIN,))
     srv = mcp_server.build(conn, TZ)
 
-    def call():
-        return json.dumps(asyncio.run(srv.call_tool("reunioes", {"inicio": d.isoformat(), "fim": d.isoformat()})),
-                          default=str, ensure_ascii=False)
+    def call(**kw) -> dict:
+        res = asyncio.run(srv.call_tool("reunioes", {"inicio": d.isoformat(), "fim": d.isoformat(), **kw}))
+        return json.loads(res.content[0].text)
 
-    assert "antigo" not in call()                                     # stored at 08:00 of that day: recomputed
-    store.put_artefact(conn, "meetings:summary", f"{d}..{d}", stale)  # stored after the day ended: reused
-    assert "antigo" in call()
+    assert call().get("marca") is None and call()["n_meetings"] == 1   # stored at 08:00 of that day
+    store.put_artefact(conn, "meetings:summary", f"{d}..{d}", stale)      # stored after the day ended
+    assert call().get("marca") is None and call()["n_meetings"] == 1
+    # a transcript of that past day imported days later shows up without `recalcular`
+    store.upsert_event(conn, Event("m2", "meeting", a + 15 * 60 * MIN, a + 16 * 60 * MIN, "retro", "t", {}))
+    assert call()["n_meetings"] == 2 and call(recalcular=True)["n_meetings"] == 2
+
+
+def test_report_facts_list_each_meeting_once_after_dedup():
+    """A response stored for the calendar entry before its transcript arrived is not a second meeting:
+    the facts (and the 'dias' Doc) follow jobs.dedup_meetings, like n_meetings does."""
+    from pulso.export import summary
+
+    conn = store.connect(":memory:")
+    d = date(2026, 10, 7)
+    a, b = analysis.local_day_bounds(d, TZ)
+    store.upsert_samples(conn, M.AROUSAL_Z, M.DERIVED, [(a + i * MIN, 0.3) for i in range((b - a) // MIN)])
+    store.upsert_event(conn, Event("cal1", "calendar", a + 14 * 60 * MIN, a + 15 * 60 * MIN, "1:1 Ana Souza", "ics", {}))
+    store.upsert_event(conn, Event("gone", "calendar", a + 17 * 60 * MIN, a + 18 * 60 * MIN, "cancelada", "ics", {}))
+    F.build(conn, d, d, TZ)                                    # mid-day `fatos`: responses for both calendar entries
+    assert store.get_artefact(conn, "meeting_response", "cal1") and store.get_artefact(conn, "meeting_response", "gone")
+    conn.execute("DELETE FROM events WHERE id = 'gone'")       # removed from the calendar since
+    store.upsert_event(conn, Event("t1", "meeting", a + 14 * 60 * MIN + 2 * MIN, a + 15 * 60 * MIN, "1-1-ana-souza",
+                                   "transcript:vtt", {"start_source": "calendar:cal1"}))
+    book = F.build(conn, d, d, TZ)
+    meets = [f.text for f in book.facts if f.topic == "reunião"]
+    assert len(meets) == 1 and "1-1-ana-souza" in meets[0], meets
+    days = summary.build_days(conn, TZ, d, days=1)
+    lines = [ln for ln in days.splitlines() if ln.startswith("- Reunião ")]
+    assert len(lines) == 1 and "1-1-ana-souza" in lines[0], lines
 
 
 def test_report_dry_run_needs_no_client(analysed):

@@ -4,8 +4,9 @@ The report model never sees raw series. It receives a numbered list of *facts* �
 with numbers already computed by the deterministic pipeline — and must cite fact ids for every
 claim. Then the numbers gate checks that every number, date, weekday and clock time it wrote exists
 in the facts it cited (tolerating rounding only), with or without a unit glued to it ("25ms", "14h"),
-small counts and number words ("onze") included. An insight that fails the gate is not published; it is listed under "rejected" so
-you can see what the model tried to say. Colleagues' names are pseudonymised before the facts leave
+small counts and words ("zero", "onze", "duzentos", "dois mil e quinhentos", "segunda feira", "meio-dia")
+included. An insight that fails the gate is not published; it is listed under "rejected" so you can
+see what the model tried to say. Colleagues' names are pseudonymised before the facts leave
 the machine (see `ai.names` and `report.generate`).
 """
 
@@ -98,31 +99,66 @@ def _fact(fid: str, text: str, topic: str) -> Fact:
 #   dates   2026-10-15, 15/10, 15/10/2026, "15 de outubro"   -> must be a date of a cited fact
 #   times   14:32, 9h05, 7h30                                 -> must be a time of a cited fact
 #   hours   14h, 4h (no minutes: a clock hour or a duration)  -> a cited number or a cited time's hour
+#           meio-dia (12h), meia-noite (0h)
 #   numbers 2,4  -0,5  25ms  2,8z  90min  15%                 -> a cited number (rounding tolerated)
-#           dois..dez, onze..dezenove, vinte..noventa (e um..nove), cem
-#   weekday quinta, quinta-feira, sábado (bare "segunda" is also an ordinal: not checked)
+#           in words, as one value: zero, dois, onze, trinta e seis, cem, cento e vinte, duzentos, mil,
+#           dois mil e quinhentos ("um"/"uma" alone are also articles: not checked)
+#   weekday quinta, quinta-feira, segunda feira, sábado (bare "segunda" is also an ordinal: not checked)
 #                                                             -> the weekday of a cited date (or named in it)
 # A unit glued to the number ("25ms") does not hide it, and no number is exempt for being small.
+# Not read as numbers: fractions, proportions, ordinals and collectives in words ("meia hora", "metade",
+# "o dobro", "terceira noite", "dúzia", "dezena", "centena", "milhão"), and the "zero" of the CI verdict
+# "cruza o zero" (a verdict, not a value: it would let "0 z" stand for a fact with decimals). A token the patterns match but cannot read ("ſete", "MİL": IGNORECASE folds them
+# to ASCII, .lower() does not) fails the gate instead of raising.
 _FID = re.compile(r"\bF\d+\b")                                   # fact ids are not numbers
+_CROSS = re.compile(r"\b(?:n[ãa]o\s+)?(?:cruza|cruzam|cruzando|cruzar|inclui|incluem|incluindo)\s+(?:o\s+)?zero\b",
+                    re.IGNORECASE)                                 # a CI verdict, not a value
 _ISO = re.compile(r"(?<![\d-])(\d{4})-(\d{2})-(\d{2})(?!\d)")
 _MONTHS = {"janeiro": 1, "fevereiro": 2, "março": 3, "marco": 3, "abril": 4, "maio": 5, "junho": 6, "julho": 7,
            "agosto": 8, "setembro": 9, "outubro": 10, "novembro": 11, "dezembro": 12}
 _DMONTH = re.compile(r"(?<![\w.,])(\d{1,2})[º°]?\s+de\s+(" + "|".join(_MONTHS) + r")(?:\s+de\s+(\d{4}))?\b", re.IGNORECASE)
 _DMY = re.compile(r"(?<![\w.,/])(\d{1,2})/(\d{1,2})(?:/(\d{4}|\d{2}))?(?![\d/])")
-_TIME = re.compile(r"(?<![\d.,:])([01]?\d|2[0-3])[:h]([0-5]\d)(?![\d:])")
+_TIME = re.compile(r"(?<![\d.,:])([01]?\d|2[0-3])[:h]([0-5]\d)(?!\d|:\d)")   # "às 10:00: durante" too
 _HOUR = re.compile(r"(?<![\w.,:])([01]?\d|2[0-3])h(?!\w)")
+_MIDDAY = re.compile(r"\b(?:(meio)[-\s]+dia|meia[-\s]+noite)\b", re.IGNORECASE)   # clock hours in words
 _NUM = re.compile(r"(?<![\w.,])[-−]?\d+(?:[.,]\d+)?(?!\d)")
 _UNITS = {"um": 1, "uma": 1, "dois": 2, "duas": 2, "três": 3, "tres": 3, "quatro": 4, "cinco": 5, "seis": 6,
           "sete": 7, "oito": 8, "nove": 9}
 _TENS = {"vinte": 20, "trinta": 30, "quarenta": 40, "cinquenta": 50, "cinqüenta": 50, "sessenta": 60,
          "setenta": 70, "oitenta": 80, "noventa": 90}
-_WORDNUM = {k: v for k, v in _UNITS.items() if v > 1} | {   # "um/uma" alone are also articles: not checked
-    "dez": 10, "onze": 11, "doze": 12, "treze": 13, "catorze": 14, "quatorze": 14, "quinze": 15,
-    "dezesseis": 16, "dezasseis": 16, "dezessete": 17, "dezassete": 17, "dezoito": 18, "dezenove": 19,
-    "dezanove": 19, "cem": 100} | _TENS
-_NUMWORD = re.compile(r"\b(?:(" + "|".join(_TENS) + r")\s+e\s+(" + "|".join(_UNITS) + r")|(" + "|".join(_WORDNUM) + r"))\b",
-                      re.IGNORECASE)                       # "vinte e cinco" is 25, not 20 and 5
-_WEEKDAY = re.compile(r"\b(?:(segunda|terça|terca|quarta|quinta|sexta)s?-feiras?|(terça|terca|quarta|quinta|sexta)s?"
+_TEENS = {"dez": 10, "onze": 11, "doze": 12, "treze": 13, "catorze": 14, "quatorze": 14, "quinze": 15,
+          "dezesseis": 16, "dezasseis": 16, "dezessete": 17, "dezassete": 17, "dezoito": 18, "dezenove": 19,
+          "dezanove": 19}
+_HUNDREDS = {"cento": 100, "duzentos": 200, "duzentas": 200, "trezentos": 300, "trezentas": 300,
+             "quatrocentos": 400, "quatrocentas": 400, "quinhentos": 500, "quinhentas": 500, "seiscentos": 600,
+             "seiscentas": 600, "setecentos": 700, "setecentas": 700, "oitocentos": 800, "oitocentas": 800,
+             "novecentos": 900, "novecentas": 900}
+_WORDVAL = _UNITS | _TEENS | _TENS | _HUNDREDS | {"cem": 100, "zero": 0}
+
+
+def _alt(words) -> str:
+    return "(?:" + "|".join(sorted(words, key=len, reverse=True)) + ")"
+
+
+# one number as Portuguese writes it: "cento e vinte e cinco" is 125, "dois mil e quinhentos" 2500 (never
+# 100, 20, 5...); "dois e três" stays two numbers (a ten/hundred/"mil" must lead an "e"), and "cento"
+# only counts with what follows ("por cento" is a percent sign, its number is checked on its own)
+_B100 = rf"(?:{_alt(_TENS)}(?:\s+e\s+{_alt(_UNITS)})?|{_alt(_TEENS)}|{_alt(_UNITS)})"
+_B1000 = rf"(?:cento\s+e\s+{_B100}|{_alt(set(_HUNDREDS) - {'cento'})}(?:\s+e\s+{_B100})?|cem|{_B100})"
+_NUMWORD = re.compile(rf"\b(?:(?:{_B1000}\s+)?mil(?:\s+(?:e\s+)?{_B1000})?|{_B1000}|zero)\b", re.IGNORECASE)
+
+
+def _wordnum(phrase: str) -> float:
+    total = cur = 0.0
+    for w in phrase.lower().split():
+        if w == "mil":
+            total, cur = total + (cur or 1) * 1000, 0.0
+        elif w != "e":
+            cur += _WORDVAL.get(w, math.nan)   # unreadable: NaN matches no fact
+    return total + cur
+
+
+_WEEKDAY = re.compile(r"\b(?:(segunda|terça|terca|quarta|quinta|sexta)s?[-\s]+feiras?|(terça|terca|quarta|quinta|sexta)s?"
                       r"(?!\s+(?:vez|vezes|parte)\b)|(sábado|sabado|domingo)s?)\b", re.IGNORECASE)
 _WEEKDAY_N = {"segunda": 0, "terça": 1, "terca": 1, "quarta": 2, "quinta": 3, "sexta": 4, "sábado": 5, "sabado": 5, "domingo": 6}
 
@@ -146,6 +182,7 @@ def _date(y: int | None, m: int, d: int) -> str | None:
 def _scan(text: str) -> list[_Tok]:
     toks: list[_Tok] = []
     t = _FID.sub(lambda m: " " * len(m.group(0)), text)
+    t = _CROSS.sub(lambda m: " " * len(m.group(0)), t)
 
     def take(rx: re.Pattern, make) -> None:
         nonlocal t
@@ -167,7 +204,10 @@ def _scan(text: str) -> list[_Tok]:
         return d and _Tok(m.start(), "date", d, m[0])
 
     def dmonth(m):
-        d = _date(year(m[3]), _MONTHS[m[2].lower()], int(m[1]))
+        mo = _MONTHS.get(m[2].lower())
+        if mo is None:   # unreadable month: a date that matches no fact
+            return _Tok(m.start(), "date", "?", m[0])
+        d = _date(year(m[3]), mo, int(m[1]))
         return d and _Tok(m.start(), "date", d, m[0])
 
     def dmy(m):
@@ -179,16 +219,18 @@ def _scan(text: str) -> list[_Tok]:
     take(_DMY, dmy)
     take(_TIME, lambda m: _Tok(m.start(), "time", f"{int(m[1]):02d}:{m[2]}", m[0]))
     take(_HOUR, lambda m: _Tok(m.start(), "hour", float(m[1]), m[0]))
+    take(_MIDDAY, lambda m: _Tok(m.start(), "hour", 12.0 if m[1] else 0.0, m[0]))
     for m in _NUM.finditer(t):
         raw = m.group(0)
         frac = re.split(r"[.,]", raw)
         toks.append(_Tok(m.start(), "num", float(raw.replace("−", "-").replace(",", ".")), raw,
                          nd=len(frac[1]) if len(frac) > 1 else 0))
     for m in _NUMWORD.finditer(t):
-        v = _TENS[m[1].lower()] + _UNITS[m[2].lower()] if m[1] else _WORDNUM[m[3].lower()]
-        toks.append(_Tok(m.start(), "num", float(v), m[0]))
+        if m[0].lower() in ("um", "uma"):   # an article as often as a number
+            continue
+        toks.append(_Tok(m.start(), "num", _wordnum(m[0]), m[0]))
     for m in _WEEKDAY.finditer(t):
-        toks.append(_Tok(m.start(), "weekday", _WEEKDAY_N[(m[1] or m[2] or m[3]).lower()], m[0]))
+        toks.append(_Tok(m.start(), "weekday", _WEEKDAY_N.get((m[1] or m[2] or m[3]).lower(), -1), m[0]))
     return sorted(toks, key=lambda k: k.pos)
 
 
@@ -198,15 +240,15 @@ def extract_times(text: str) -> list[str]:
 
 def extract_numbers(text: str) -> list[float]:
     """Numbers as written, clock-free hours ('22h') included; dates and times are not values."""
-    return [float(k.value) for k in _scan(text) if k.kind in ("num", "hour")]
+    return [float(k.value) for k in _scan(text) if k.kind in ("num", "hour") and not math.isnan(k.value)]
 
 
 def extract_dates(text: str) -> list[str]:
-    return [str(k.value) for k in _scan(text) if k.kind == "date"]
+    return [str(k.value) for k in _scan(text) if k.kind == "date" and k.value != "?"]
 
 
 def extract_weekdays(text: str) -> list[int]:
-    return [int(k.value) for k in _scan(text) if k.kind == "weekday"]
+    return [int(k.value) for k in _scan(text) if k.kind == "weekday" and k.value >= 0]
 
 
 def _matches(x: float, nd: int, pool: list[float]) -> bool:
@@ -236,7 +278,7 @@ def gate(text: str, cited: list[str], book: FactBook) -> list[str]:
     probs = []
     for k in _scan(text or ""):
         if k.kind == "num" and not _matches(float(k.value), k.nd, nums):
-            probs.append(f"número {fmt(float(k.value), 2)} não está nos fatos citados")
+            probs.append(f"número {k.raw if math.isnan(k.value) else fmt(float(k.value), 2)} não está nos fatos citados")
         elif k.kind == "hour" and not (k.value in hours or _matches(float(k.value), 0, nums)):
             probs.append(f"horário {k.raw} não está nos fatos citados")
         elif k.kind == "time" and k.value not in times:
@@ -254,6 +296,15 @@ def gate(text: str, cited: list[str], book: FactBook) -> list[str]:
 
 
 # --------------------------------------------------------------------------- fact building
+
+
+def _ci95(lo: float | None, hi: float | None) -> str:
+    """'IC95 -0,10 a 0,40, cruza o zero': the prompt's significance test stated as a fact, so the model
+    can cite it. The gate reads "cruza o zero" as a verdict (_CROSS), so it adds no 0 to the fact."""
+    s = f"IC95 {fmt(lo, 2)} a {fmt(hi, 2)}"
+    if lo is None or hi is None or math.isnan(lo) or math.isnan(hi):
+        return s
+    return f"{s}, {'cruza' if lo <= 0 <= hi else 'não cruza'} o zero"
 
 
 def build(conn: sqlite3.Connection, start: date, end: date, tz: str) -> FactBook:
@@ -290,16 +341,19 @@ def build(conn: sqlite3.Connection, start: date, end: date, tz: str) -> FactBook
     # the meeting analysis for exactly this range, computed now: the scheduler stores other ranges (last
     # 3 days), and a stored one may predate meetings or data that arrived since (a mid-day `fatos` must
     # not stand for the whole day). It also refreshes the per-meeting responses read just below.
-    summ = None
+    summ, kept = None, set()
     if conn.execute("SELECT 1 FROM events WHERE kind IN ('meeting', 'calendar') AND start_ms >= ? AND start_ms < ? LIMIT 1",
                     (a, b)).fetchone():
         from pulso import jobs
 
         summ = jobs.meeting_job(conn, start, end, tz)
+        # only the meetings that analysis kept: a response stored earlier for a calendar entry that a
+        # transcript now stands for (dedup_meetings), or for a deleted event, is not a second meeting
+        kept = {e.id for e in jobs.dedup_meetings(store.events(conn, a, b, kinds=["meeting", "calendar"]))}
 
     for r in conn.execute("SELECT key, body FROM artefacts WHERE kind = 'meeting_response'"):
         m = json.loads(r["body"])
-        if not (a <= m["start_ms"] < b):
+        if r["key"] not in kept or not (a <= m["start_ms"] < b):
             continue
         rec = f"recuperou em {fmt(m['recovery_min'], 0)} min" if m.get("recovery_min") is not None else "não voltou ao basal em 60 min"
         book.add("reunião", f"reunião \"{m.get('title') or '?'}\" em {day_label(m['day'])} às {hhmm(m['start_ms'], tz)}: antecipação {fmt(m.get('anticipation'), 2)} z, "
@@ -309,15 +363,15 @@ def build(conn: sqlite3.Connection, start: date, end: date, tz: str) -> FactBook
         vc = summ["vs_matched_controls"]
         if vc.get("mean_dz") is not None:
             book.add("reuniões", f"reuniões vs. mesmos horários sem reunião ({vc['n']} reuniões): diferença {fmt(vc['mean_dz'], 2)} z, "
-                                 f"IC95 {fmt(vc['ci'][0], 2)} a {fmt(vc['ci'][1], 2)}, p = {fmt(vc['p'], 3)}.")
+                                 f"{_ci95(*vc['ci'])}, p = {fmt(vc['p'], 3)}.")
         bb = summ.get("back_to_back")
         if bb:
             book.add("reuniões", f"reuniões coladas na anterior (< 10 min de pausa, n = {bb['n_b2b']}): {fmt(bb['mean_b2b'], 2)} z durante; "
                                  f"com pausa (n = {bb['n_break']}): {fmt(bb['mean_break'], 2)} z; diferença {fmt(bb['diff'], 2)} z, p = {fmt(bb['p'], 3)}.")
         for row in summ.get("by_speaker", [])[:5]:
-            book.add("falante", f"quando {row['label']} fala: {fmt(row['mean_dz'], 2)} z (IC95 {fmt(row['ci_low'], 2)} a {fmt(row['ci_high'], 2)}, n = {row['n']} trechos, defasagem {summ['lag_s']} s).")
+            book.add("falante", f"quando {row['label']} fala: {fmt(row['mean_dz'], 2)} z ({_ci95(row['ci_low'], row['ci_high'])}, n = {row['n']} trechos, defasagem {summ['lag_s']} s).")
         for row in summ.get("by_tag", [])[:8]:
-            book.add("tema", f"trechos marcados \"{row['label']}\": {fmt(row['mean_dz'], 2)} z (IC95 {fmt(row['ci_low'], 2)} a {fmt(row['ci_high'], 2)}, n = {row['n']}).")
+            book.add("tema", f"trechos marcados \"{row['label']}\": {fmt(row['mean_dz'], 2)} z ({_ci95(row['ci_low'], row['ci_high'])}, n = {row['n']}).")
 
     # validation against your own labels: how many "estresse" marks fall inside a detected episode
     marks = [e for e in store.events(conn, a, b, kinds=["note"]) if "estress" in (e.title or "").lower()]

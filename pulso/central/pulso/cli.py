@@ -24,6 +24,19 @@ def _range(args, tz: str) -> tuple[date, date]:
     return start, end
 
 
+def _expand(items: list[str]) -> list[str]:
+    """Patterns the shell left as typed (PowerShell/cmd expand neither `*` nor `~` for `pulso`). An
+    existing literal path is never re-globbed; a pattern that matches nothing is kept as typed."""
+    import glob
+    import os
+
+    out: list[str] = []
+    for a in items:
+        p = os.path.expanduser(a)
+        out += [p] if os.path.exists(p) or not glob.has_magic(p) else (sorted(glob.glob(p)) or [a])
+    return out
+
+
 def _print(obj) -> None:
     print(json.dumps(obj, ensure_ascii=False, indent=2, default=str))
 
@@ -155,7 +168,7 @@ def main(argv: list[str] | None = None) -> int:
             start = datetime.fromisoformat(args.start) if args.start else None
             if start is not None and start.tzinfo is None:
                 start = start.replace(tzinfo=ZoneInfo(tz))
-            for f in args.files:
+            for f in _expand(args.files):
                 print(transcripts.import_file(conn, f, start=start, title=args.title))
         elif args.icmd == "ics":
             from pulso.importers import calendar_ics
@@ -165,19 +178,30 @@ def main(argv: list[str] | None = None) -> int:
                                         args.to or today + timedelta(days=30), me=args.me)
             print(f"{n} eventos")
         elif args.icmd == "git":
+            import subprocess
+
             from pulso.importers import gitlog
 
-            for r in args.repos:
-                print(r, gitlog.import_repo(conn, r, args.author, args.since))
+            for r in _expand(args.repos):
+                try:
+                    print(r, gitlog.import_repo(conn, r, args.author, args.since))
+                except subprocess.CalledProcessError as e:  # `~/code/*` also matches folders that are not repositories
+                    # git's own reason: "not a git repository", or "detected dubious ownership" (safe.directory)
+                    why = next(iter(str(e.stderr or "").strip().splitlines()), f"git saiu com {e.returncode}")
+                    print(f"{r}: pulado ({why})", file=sys.stderr)
         elif args.icmd == "fit":
             from pulso.importers import fit
 
-            _print(fit.import_paths(conn, args.paths, tz))
+            _print(fit.import_paths(conn, _expand(args.paths), tz))
         elif args.icmd == "garmin":
             from pulso.importers import garmin_connect
 
-            rep = garmin_connect.sync(conn, days=args.days, tz=tz, since=args.since, pause_s=args.pause,
-                                      resume=not args.no_resume, reload_cold=args.reload_cold)
+            try:
+                rep = garmin_connect.sync(conn, days=args.days, tz=tz, since=args.since, pause_s=args.pause,
+                                          resume=not args.no_resume, reload_cold=args.reload_cold)
+            except garmin_connect.GarminLoginError as e:  # no extra / no usable login: one line, no traceback
+                print(f"pulso: {e}", file=sys.stderr)
+                return 1
             print(f"{len(rep)} dias sincronizados")
         elif args.icmd == "garmin-export":
             from pulso.importers import garmin_export

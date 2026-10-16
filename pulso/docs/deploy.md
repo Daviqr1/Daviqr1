@@ -9,7 +9,8 @@ requisição é o Garmin Connect Mobile no celular, e ele recusa certificado aut
 cd pulso/deploy
 cp .env.example .env            # PULSO_DOMAIN, ANTHROPIC_API_KEY, PULSO_MCP_TOKEN, ...
 docker compose up -d --build
-docker compose exec api pulso token create fr255     # cole este token nas settings dos apps do relógio
+docker compose exec api pulso token create fr255             # cole este token nas settings dos apps do relógio
+docker compose exec api pulso token create painel --painel   # token só de leitura para o /painel (o do relógio não abre o painel)
 ```
 
 O Caddy emite o certificado (Let's Encrypt) para `PULSO_DOMAIN` e encaminha:
@@ -17,6 +18,7 @@ O Caddy emite o certificado (Let's Encrypt) para `PULSO_DOMAIN` e encaminha:
 | caminho | serviço |
 |---|---|
 | `/v1/ingest`, `/v1/face`, `/health` | API de ingestão (`pulso serve`) |
+| `/painel`, `/v1/painel/*` | painel web (token `--painel`, só leitura) |
 | `/mcp` | MCP por HTTP (Bearer `PULSO_MCP_TOKEN`) |
 
 O serviço `jobs` (`pulso daemon`):
@@ -86,6 +88,7 @@ Depois do backfill: `pulso analyze --since 2025-01-01` (≈ 1 s por dia com RR; 
 ```bash
 pip install -e 'central[all]'                    # Python ≥ 3.12 (a garminconnect 0.3.x exige)
 pulso token create fr255
+pulso token create painel --painel               # token só de leitura para o /painel (o do relógio não abre o painel)
 pulso import garmin-export garmin-export.zip     # se já pediu o export da conta
 pulso import garmin --days 30                    # histórico recente (GARMIN_EMAIL/PASSWORD no 1º login)
 pulso import fit /caminho/GARMIN                 # se tiver o relógio no USB (modo MTP)
@@ -99,7 +102,11 @@ pulso report --days 7 --kind weekly
 
 Agenda: reimporte o `.ics` exportado de novo para atualizar. Reuniões movidas, canceladas ou apagadas
 saem do banco, mas só nos dias que o arquivo cobre (um export de uma semana não apaga o resto da
-janela). Um convite avulso (`invite.ics`) mexe só no próprio evento.
+janela). Um convite avulso (`invite.ics`) mexe só no próprio evento. Cada agenda é reconhecida pelo
+`X-WR-RELCALID` do Outlook ou, sem ele, pelo nome mais o nome do arquivo: duas agendas chamadas
+“Calendário” (trabalho e pessoal) não apagam uma a outra, e a mesma agenda deve voltar com o mesmo nome
+de arquivo (renomeie cada download, por exemplo trabalho.ics e pessoal.ics: o navegador salva o segundo
+calendar.ics como “calendar (1).ics”).
 
 ## Claude
 

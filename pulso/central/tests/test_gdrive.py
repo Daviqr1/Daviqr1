@@ -89,6 +89,38 @@ def test_needs_login_without_token(tmp_path, monkeypatch):
         gdrive.credentials(interactive=False)
 
 
+def test_refreshed_token_is_never_readable_by_others(tmp_path, monkeypatch):
+    """The token is rewritten on every refresh (scheduler export, ingest gcal thread), possibly outside the
+    0700 PULSO_HOME (PULSO_GDRIVE_TOKEN): it must be created 0600, not narrowed by a chmod afterwards."""
+    import os
+    import stat
+
+    from google.oauth2.credentials import Credentials
+
+    class Creds:
+        scopes, expired, valid, refresh_token = [gdrive.DRIVE_SCOPE], False, True, "r"
+
+        def to_json(self):
+            return '{"token": "segredo"}'
+
+    token = tmp_path / "fora-do-home" / "google-token.json"
+    token.parent.mkdir()
+    token.write_text("{}")
+    os.chmod(token, 0o644)                    # what an older version (or a copy by hand) left behind
+    monkeypatch.setenv("PULSO_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("PULSO_GDRIVE_TOKEN", str(token))
+    monkeypatch.setattr(Credentials, "from_authorized_user_file", classmethod(lambda cls, *a, **k: Creds()))
+    chmods = []
+    monkeypatch.setattr(os, "chmod", lambda *a, **k: chmods.append(a))   # a narrowing chmod comes too late
+    old = os.umask(0o022)
+    try:
+        assert isinstance(gdrive.credentials(interactive=False), Creds)
+    finally:
+        os.umask(old)
+    assert stat.S_IMODE(token.stat().st_mode) == 0o600 and token.read_text() == '{"token": "segredo"}'
+    assert [x.name for x in token.parent.iterdir()] == ["google-token.json"]   # no temp file left behind
+
+
 def test_gcal_alert_event_shape(monkeypatch):
     from pulso.export import gcal
 

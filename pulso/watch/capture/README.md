@@ -99,8 +99,8 @@ Sem central configurada a captura funciona normalmente, guarda na fila e a tela 
      URL de central configurada ou nos 10 min depois de uma falha do caminho do celular que não seja do
      próprio lote (túnel caído, URL velha, timeout, 404/5xx; o lote que falhou vai para a ponte na hora):
      JSON assinado com HMAC-SHA256 (chave = SHA-256 do token, sobre o `q` e o JSON), apagado da fila só
-     depois de uma confirmação da ponte assinada com a mesma chave (gravado, ou conteúdo recusado com
-     400/413/422).
+     depois de uma confirmação da ponte assinada com a mesma chave e sobre o MAC daquele conteúdo
+     (gravado, ou conteúdo recusado com 400/413/422).
 
    Antes de mandar qualquer coisa o relógio confere a ponte (HELLO: ela precisa provar que tem a chave do
    token), então um aparelho que só imita o serviço não recebe nada nem apaga lote. Roteamento por lote
@@ -209,7 +209,10 @@ dispositivo do FR255 (API 5.2).
 Sideload: conecte o relógio por USB (no Linux aparece como MTP: `gio mount`, `jmtpfs` ou o gerenciador
 de arquivos; no macOS, OpenMTP), copie `watch/capture/bin/PulsoCaptura.prg` para `GARMIN/APPS/` e desconecte. O app aparece
 na lista de atividades/apps. Para atualizar, substitua o arquivo; a fila e o id do aparelho continuam no
-armazenamento do app.
+armazenamento do app. Atualize o `.prg` e a central (ponte BLE) juntos: o formato da confirmação `0xB1`
+muda entre versões, e com versões diferentes o relógio não aceita nenhuma confirmação da ponte, mesmo de um
+lote que ela gravou — reenvia o mesmo lote e, enquanto os lotes forem pela ponte, não esvazia a fila;
+cheia, ela descarta os mais antigos.
 
 ## Testes no computador
 
@@ -222,7 +225,8 @@ armazenamento do app.
 - governador em malha fechada com bateria de 1 %;
 - um lote no formato do relógio passando pelo validador e pelo `ingest()` da central, inclusive o reenvio duplicado;
 - os frames da ponte BLE contra o decodificador real da ponte: HELLO e a prova, lote depois de uma tentativa
-  abandonada, confirmação assinada (outra tentativa, outro lote, outro nonce ou outra chave é ignorada),
+  abandonada, confirmação assinada (outra tentativa, outro lote, outro nonce, outra chave ou veredito sobre
+  outro conteúdo — um lote de outra instalação repetido sob o mesmo `q` — é ignorada),
   SYNC perdido sem datar errado e o filtro que recusa RR/FC/marcações no fluxo aberto.
 
 ```bash

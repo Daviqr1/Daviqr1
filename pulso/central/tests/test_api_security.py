@@ -65,12 +65,6 @@ def _endless():
         yield b" " * CHUNK
 
 
-@pytest.fixture(autouse=True)
-def _own_pulso_home(tmp_path, monkeypatch):
-    # cli.main and notebook.run create ~/.pulso; never the real one of whoever runs the tests
-    monkeypatch.setenv("PULSO_HOME", str(tmp_path / "pulso-home"))
-
-
 @pytest.fixture()
 def app_tokens():
     conn = store.connect(":memory:")
@@ -400,6 +394,88 @@ def test_notebook_turns_the_tailscale_funnel_off_on_sighup(tmp_path):
     assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
     assert lines[0] == "funnel --bg 8080"
     assert lines[-1] == "funnel --https=443 --set-path=/ off"
+
+
+_SECOND_SIGNAL = r'''
+import os, signal, subprocess, sys, time
+signal.signal(signal.SIGINT, signal.default_int_handler)  # as under a terminal, whatever the test runner inherited
+from pulso import config, notebook
+
+
+def fake_run(cmd, *a, **k):
+    args = list(cmd[1:])
+    print(" ".join(args), k.get("start_new_session"), flush=True)
+    if args[-1] == "off":  # the user presses Ctrl+C again, then systemd/kill follows, while `off` runs
+        os.kill(os.getpid(), signal.SIGINT)
+        time.sleep(0.3)
+        os.kill(os.getpid(), signal.SIGTERM)
+        time.sleep(0.3)
+        print("off done", flush=True)
+    out = "# Funnel on:\n#     - https://box.tail1234.ts.net\n" if args[:2] == ["funnel", "status"] else ""
+    return subprocess.CompletedProcess(cmd, 0, stdout=out, stderr="")
+
+
+def ctrl_c(*a):
+    raise KeyboardInterrupt
+
+
+notebook.shutil.which = lambda name: "/usr/bin/" + name
+notebook.subprocess.run = fake_run
+notebook._start_api = lambda *a: None
+notebook._serve = ctrl_c
+notebook.run(config.Settings(db_path=sys.argv[1]), tunnel="tailscale", jobs=False)
+print(signal.getsignal(signal.SIGINT) is signal.default_int_handler, signal.getsignal(signal.SIGTERM) == signal.SIG_DFL)
+'''
+
+
+@pytest.mark.skipif(not hasattr(signal, "SIGHUP"), reason="POSIX only")
+def test_notebook_second_signal_does_not_cut_the_funnel_shutdown_short(tmp_path):
+    """review r2: a second Ctrl+C (or a kill) while `tailscale funnel ... off` runs used to kill it and
+    leave the Funnel public; now the shutdown finishes, in its own session, and the handlers come back."""
+    import pulso
+
+    env = {**os.environ, "PYTHONPATH": os.path.dirname(os.path.dirname(pulso.__file__))}
+    r = subprocess.run([sys.executable, "-c", _SECOND_SIGNAL, str(tmp_path / "p.sqlite")], env=env, cwd=tmp_path,
+                       capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+    assert r.stdout.splitlines()[-3:] == ["funnel --https=443 --set-path=/ off True", "off done", "True True"]
+
+
+def test_notebook_undoes_the_funnel_when_interrupted_while_reading_its_url(fake_tailscale, monkeypatch):
+    notebook, settings, calls, _ = fake_tailscale
+    inner = notebook.subprocess.run
+
+    def run(cmd, *a, **k):
+        if list(cmd[1:3]) == ["funnel", "status"]:
+            calls.append(list(cmd[1:]))
+            raise KeyboardInterrupt  # after `--bg` succeeded, before `stop` reached run()
+        return inner(cmd, *a, **k)
+
+    monkeypatch.setattr(notebook.subprocess, "run", run)
+    monkeypatch.setattr(notebook, "_serve", lambda *a: pytest.fail("served after Ctrl+C"))
+    notebook.run(settings, tunnel="tailscale", jobs=False)
+    assert calls == [["funnel", "--bg", "8080"], ["funnel", "status"], ["funnel", "--https=443", "--set-path=/", "off"]]
+
+
+def test_notebook_prints_the_manual_command_whatever_stops_the_funnel_off(fake_tailscale, monkeypatch, capsys):
+    notebook, settings, calls, _ = fake_tailscale
+    inner = notebook.subprocess.run
+
+    def run(cmd, *a, **k):
+        if cmd[-1] == "off":
+            raise KeyboardInterrupt
+        return inner(cmd, *a, **k)
+
+    def ctrl_c(*a):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(notebook.subprocess, "run", run)
+    monkeypatch.setattr(notebook, "_serve", ctrl_c)
+    try:
+        notebook.run(settings, tunnel="tailscale", jobs=False)
+    except KeyboardInterrupt:
+        pytest.fail("the interrupted `off` escaped run() without the manual command")
+    assert "rode `tailscale funnel --https=443 --set-path=/ off`" in capsys.readouterr().err
 
 
 def test_notebook_leaves_serve_config_alone_when_the_funnel_did_not_start(fake_tailscale, monkeypatch):

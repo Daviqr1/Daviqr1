@@ -273,6 +273,155 @@ def test_ics_date_range_export_keeps_the_rest_of_the_window(tmp_path: Path, week
     assert store.get_artefact(conn, "meeting_response", first.id)
 
 
+# one instance of the weekly series moved weeks before the range: Outlook writes a series with all its exceptions
+MOVED = ("BEGIN:VEVENT\nDTSTART:20260915T170000Z\nDTEND:20260915T173000Z\nRECURRENCE-ID:20260914T110000Z\n"
+         "UID:weekly@x\nSUMMARY:1:1\nEND:VEVENT\n")
+
+
+def _with(export: str, body: str = "", head: str = "") -> str:
+    return export.replace("X-WR-CALNAME:Calendar\n", "X-WR-CALNAME:Calendar\n" + head).replace("END:VCALENDAR", body + "END:VCALENDAR")
+
+
+def test_ics_range_export_ignores_the_span_of_a_series_own_exceptions(tmp_path: Path):
+    """review r2: the moved 09-14 instance travels with the series in a 7-day export; it must not stretch
+    the days the export speaks for back to September and erase M1..M15 with their analyses."""
+    pytest.importorskip("icalendar")
+    from pulso.importers import calendar_ics
+
+    conn = store.connect(":memory:")
+    window = ("America/Sao_Paulo", date(2026, 9, 1), date(2026, 11, 1))
+    f = tmp_path / "agenda.ics"
+    f.write_text(_with(_export(range(1, 31), weekly=True), MOVED))
+    calendar_ics.import_ics(conn, f, *window)
+    full = [e.title for e in store.events(conn, 0, 2**62, kinds=["calendar"])]
+    first = [e for e in store.events(conn, 0, 2**62, kinds=["calendar"]) if e.title == "M3"][0]
+    store.put_artefact(conn, "meeting_response", first.id, {"title": "M3", "during": 1.0})
+    f.write_text(_with(_export([k for k in range(16, 23) if k != 20], weekly=True), MOVED))
+    calendar_ics.import_ics(conn, f, *window)
+    left = [e.title for e in store.events(conn, 0, 2**62, kinds=["calendar"])]
+    assert sorted(left) == sorted(t for t in full if t != "M20")
+    assert len(left) == 29 + 8
+    assert store.get_artefact(conn, "meeting_response", first.id)
+
+
+def test_ics_declared_export_range_bounds_what_is_erased(tmp_path: Path):
+    """With no single event left in a 7-day export, the series' exceptions stand in for the days it
+    covers; Outlook's X-CLIPSTART/X-CLIPEND (the range picked in 'Save Calendar') keep that guess inside
+    the range actually exported. X-CALSTART/X-CALEND are only the file's first/last instance: the series'
+    first Monday, which bounds nothing (review r2: reading them erased S14/S15 and S15's analysis)."""
+    pytest.importorskip("icalendar")
+    from pulso.importers import calendar_ics
+
+    conn = store.connect(":memory:")
+    window = ("America/Sao_Paulo", date(2026, 9, 1), date(2026, 11, 1))
+    sept = "BEGIN:VEVENT\nDTSTART:20260915T130000Z\nDTEND:20260915T140000Z\nUID:s15@x\nSUMMARY:S15\nEND:VEVENT\n"
+    f = tmp_path / "agenda.ics"
+    f.write_text(_with(_export(range(1, 31), weekly=True), MOVED + sept))
+    calendar_ics.import_ics(conn, f, *window)
+    full = {e.title for e in store.events(conn, 0, 2**62, kinds=["calendar"])}
+    s15 = [e for e in store.events(conn, 0, 2**62, kinds=["calendar"]) if e.title == "S15"][0]
+    store.put_artefact(conn, "meeting_response", s15.id, {"title": "S15", "during": 1.0})
+    # every single event of 10-16..10-22 was deleted; the export of that week carries only the series,
+    # with the headers Outlook writes (MS-OXCICAL 2.1.3.1.1.4-7)
+    head = ("X-CALSTART:20260907T110000Z\nX-CALEND:20261026T113000Z\n"
+            "X-CLIPSTART:20261016T030000Z\nX-CLIPEND:20261023T030000Z\n")
+    f.write_text(_with(_export([], weekly=True), MOVED, head=head))
+    calendar_ics.import_ics(conn, f, *window)
+    assert {e.title for e in store.events(conn, 0, 2**62, kinds=["calendar"])} == full  # S15 (09-15) survives
+    assert store.get_artefact(conn, "meeting_response", s15.id)
+
+
+def test_ics_calendars_with_the_same_name_do_not_erase_each_other(tmp_path: Path):
+    """review r2: Outlook's default calendar is "Calendário" in the work and in the personal account."""
+    pytest.importorskip("icalendar")
+    from pulso.importers import calendar_ics
+
+    conn = store.connect(":memory:")
+    window = ("America/Sao_Paulo", date(2026, 9, 1), date(2026, 11, 1))
+
+    def cal(days, tag, head=""):
+        return _with(_export(days).replace("@x", f"@{tag}").replace("SUMMARY:M", f"SUMMARY:{tag}"),
+                     head=head).replace("X-WR-CALNAME:Calendar", "X-WR-CALNAME:Calendário")
+
+    def titles():
+        return {e.title for e in store.events(conn, 0, 2**62, kinds=["calendar"])}
+
+    work, personal = tmp_path / "trabalho.ics", tmp_path / "pessoal.ics"
+    work.write_text(cal(range(1, 11), "W"))
+    personal.write_text(cal(range(3, 9), "P"))
+    for f in (work, personal, work):
+        calendar_ics.import_ics(conn, f, *window)
+    both = {f"W{k}" for k in range(1, 11)} | {f"P{k}" for k in range(3, 9)}
+    assert titles() == both
+    # each one still drops what it no longer has
+    work.write_text(cal([k for k in range(1, 11) if k != 5], "W"))
+    calendar_ics.import_ics(conn, work, *window)
+    assert titles() == both - {"W5"}
+
+    # Outlook web's published links (Exchange: no X-WR-RELCALID) all download as calendar.ics; the browser
+    # saves the second account's as "calendar (1).ics", which is not the same calendar
+    conn = store.connect(":memory:")
+    first, second = tmp_path / "calendar.ics", tmp_path / "calendar (1).ics"
+    first.write_text(cal(range(1, 11), "W"))
+    second.write_text(cal(range(3, 9), "P"))
+    for f in (first, second, first):
+        calendar_ics.import_ics(conn, f, *window)
+    assert titles() == both
+
+    # the same file name from two Outlook accounts: X-WR-RELCALID tells them apart
+    conn = store.connect(":memory:")
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    a, b = tmp_path / "a" / "Calendário.ics", tmp_path / "b" / "Calendário.ics"
+    a.write_text(cal(range(1, 11), "W", head="X-WR-RELCALID:{0000002E-AAAA}\n"))
+    b.write_text(cal(range(3, 9), "P", head="X-WR-RELCALID:{0000002E-BBBB}\n"))
+    for f in (a, b, a):
+        calendar_ics.import_ics(conn, f, *window)
+    assert titles() == both
+
+
+def test_ics_rows_from_before_calendar_id_are_still_swept(tmp_path: Path):
+    """review r2: rows imported before calendar_id existed (attrs has only "calendar") must still go
+    when the same calendar no longer has them, or a meeting deleted in Outlook feeds the analysis forever."""
+    pytest.importorskip("icalendar")
+    from pulso.importers import calendar_ics
+
+    conn = store.connect(":memory:")
+    window = ("America/Sao_Paulo", date(2026, 9, 1), date(2026, 11, 1))
+    f = tmp_path / "agenda.ics"
+    f.write_text(_export(range(1, 11)))
+    calendar_ics.import_ics(conn, f, *window)
+    for r in conn.execute("SELECT id, attrs FROM events WHERE kind = 'calendar'").fetchall():   # as the old importer wrote them
+        attrs = json.loads(r["attrs"])
+        attrs.pop("calendar_id")
+        conn.execute("UPDATE events SET attrs = ? WHERE id = ?", (json.dumps(attrs), r["id"]))
+    f.write_text(_export([k for k in range(1, 11) if k != 5]))   # M5 deleted in Outlook
+    calendar_ics.import_ics(conn, f, *window)
+    assert {e.title for e in store.events(conn, 0, 2**62, kinds=["calendar"])} == {f"M{k}" for k in range(1, 11)} - {"M5"}
+    # a legacy row of another calendar (another name) is left alone
+    conn.execute("UPDATE events SET attrs = json_set(attrs, '$.calendar', 'Outra') WHERE id IN "
+                 "(SELECT id FROM events WHERE kind = 'calendar' AND title = 'M7')")
+    conn.execute("UPDATE events SET attrs = json_remove(attrs, '$.calendar_id') WHERE kind = 'calendar' AND title = 'M7'")
+    f.write_text(_export([k for k in range(1, 11) if k not in (5, 7)]))
+    calendar_ics.import_ics(conn, f, *window)
+    assert "M7" in {e.title for e in store.events(conn, 0, 2**62, kinds=["calendar"])}
+
+
+def test_ics_uppercase_mailto_is_stripped(tmp_path: Path):
+    pytest.importorskip("icalendar")
+    from pulso.importers import calendar_ics
+
+    conn = store.connect(":memory:")
+    f = tmp_path / "convite.ics"
+    f.write_text(INVITE.format(method="REQUEST", s="20261012T130000Z", e="20261012T140000Z", uid="u@x", t="Sync",
+                               status="CONFIRMED").replace(
+        "STATUS:", "ORGANIZER:MAILTO:davi@x.com\nATTENDEE:MAILTO:rafael.reis@x.com\nATTENDEE;CN=Ana:Mailto:ana@x.com\nSTATUS:"))
+    calendar_ics.import_ics(conn, f, "America/Sao_Paulo", date(2026, 10, 1), date(2026, 10, 31), me="davi@x.com")
+    ev = store.events(conn, 0, 2**62, kinds=["calendar"])[0]
+    assert ev.attrs["attendees"] == ["rafael.reis@x.com", "Ana"]
+    assert ev.attrs["organizer_is_me"]
+
+
 def test_git_import(tmp_path: Path):
     from pulso.importers import gitlog
 

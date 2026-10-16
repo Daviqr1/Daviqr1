@@ -29,7 +29,9 @@ module BleSt {
 //! Nothing but HELLO is written until the peripheral proves it holds the key: HELLO carries the
 //! key id and a fresh nonce, and the bridge must answer HMAC(key, "pulso-hello" | nonce). Every blob
 //! result is signed with the same key and nonce and names the attempt, so a look-alike peripheral
-//! advertising the (public) service UUID neither receives batches nor makes the watch delete them.
+//! advertising the (public) service UUID neither receives batches nor makes the watch delete them;
+//! "stored" / "rejected" also sign the blob MAC they are about, so they only ever clear the exact
+//! bytes this watch signed (not a genuine blob of another app life replayed under the same q).
 //! The frame seq is written at transmission time, so a gap on the bridge means frames lost on air.
 class BleLink extends BluetoothLowEnergy.BleDelegate {
     const MAX_UNITS = 40;            // ~40 s of 25-Hz accelerometer (~6 frames each)
@@ -479,13 +481,16 @@ class BleLink extends BluetoothLowEnergy.BleDelegate {
 
     //! Status of a blob ack (0xB1 | q u32 | attempt u8 | status u8 | mac[8]) for the attempt in
     //! flight; -1 when it names another batch or attempt, -2 when it names ours but its MAC does
-    //! not check: mac = HMAC(key, "pulso-ack" | nonce | q | attempt | status)[0..8).
+    //! not check: mac = HMAC(key, "pulso-ack" | nonce | q | attempt | status | subject)[0..8), the
+    //! subject being our own blob MAC for a verdict (0 stored, 1 rejected: the batch is deleted)
+    //! and 16 zero bytes otherwise. A verdict about any other content thus never checks.
     private function ackStatus(v as ByteArray) as Number {
         var q = v[3] | (v[4] << 8) | (v[5] << 16) | (v[6] << 24);
         if (q != _blobQ || v[7] != _blobAttempt || _key == null) {
             return -1;
         }
-        var mac = hmac(_key as ByteArray, Json.utf8("pulso-ack"), _nonce, v.slice(3, 9), 8);
+        var body = v.slice(3, 9).addAll(v[8] <= 1 ? _blobMac : new [16]b);
+        var mac = hmac(_key as ByteArray, Json.utf8("pulso-ack"), _nonce, body, 8);
         return same(v, 9, mac, 8) ? v[8] : -2;
     }
 
@@ -871,8 +876,9 @@ class BleLink extends BluetoothLowEnergy.BleDelegate {
             if (st >= 0) {
                 finishBlob(st == 0 ? 200 : (st == 1 ? 422 : (st == 2 ? 401 : 503)));
             } else if (st == -2) {
-                // our attempt, signed for another nonce: the bridge's HELLO state moved on. Never
-                // act on it (the batch stays queued); prove the bridge again.
+                // our attempt, but signed for another nonce (the bridge's HELLO state moved on) or
+                // about a blob we did not sign (someone replayed another one under our q and
+                // attempt). Never act on it (the batch stays queued); prove the bridge again.
                 finishBlob(503);
                 restart();
                 return;

@@ -50,11 +50,13 @@ pulso analyze --days 60
 pulso tag --days 30                                         # etiqueta trechos das reuniões (Claude)
 pulso report --kind weekly --days 7                         # relatório verificado (Claude)
 pulso serve                                                 # ingestão + painel em http://localhost:8080/painel
+pulso token create painel --painel                          # token só de leitura para o /painel (o do relógio não abre o painel)
 claude mcp add pulso -- pulso mcp                           # o Claude consulta e cruza seus dados
 ```
 
 Relógio: compile e instale `watch/face` e `watch/capture` (instruções em cada README), gere um token com
-`pulso token create fr255` e configure URL + token nas settings dos apps pelo Garmin Connect. A central
+`pulso token create fr255` e configure URL + token nas settings dos apps pelo Garmin Connect (o painel usa
+outro token, só de leitura: `pulso token create painel --painel`). A central
 precisa de HTTPS com certificado público para o relógio: [docs/deploy.md](docs/deploy.md) (Docker + Caddy,
 ou túnel Cloudflare/Tailscale).
 

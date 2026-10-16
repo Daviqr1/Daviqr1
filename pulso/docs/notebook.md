@@ -10,7 +10,7 @@ Ele sobe, no mesmo processo:
 
 | Peça | Para quê |
 |---|---|
-| API de ingestão + painel (`localhost:8080`) | recebe o mostrador e o app pelo celular; painel em `/painel` |
+| API de ingestão + painel (`localhost:8080`) | recebe o mostrador e o app pelo celular; painel em `/painel` (token `pulso token create painel --painel`) |
 | Jobs | reanálise e alertas a cada 5 min, Garmin Connect a cada 6 h (de hora em hora pela manhã até a noite passada chegar), sono/reuniões a partir das 04:30, a noite passada assim que chega, relatório às 06:30, os três resumos às 06:45 e o “Hoje” a cada 2 h ([horários](deploy.md#1-vps-ou-servidor-com-domínio-recomendado)) |
 | Ponte BLE (`--ble`) | o relógio manda direto para o notebook, sem celular |
 | Túnel (`--tunnel`) | HTTPS público para o celular alcançar o notebook |
@@ -47,8 +47,10 @@ rodam quando o notebook volta: sono/reuniões e os três resumos no mesmo dia, o
 
 ## Checklist do primeiro dia
 
-1. `pip install -e 'central[all,bridge]'` e `pulso token create fr255`.
+1. `pip install -e 'central[all,bridge]'`, `pulso token create fr255` (relógio) e
+   `pulso token create painel --painel` (token só de leitura para o `/painel`; o do relógio não abre o painel).
 2. `pulso notebook --ble --tunnel tailscale` e anote a URL.
-3. Garmin Connect (celular) → Connect IQ → Pulso e Pulso Captura → configurações: URL e token.
+3. Garmin Connect (celular) → Connect IQ → Pulso e Pulso Captura → configurações: URL e token do relógio
+   (só para apps da loja; instalados por USB, embuta os dois no build: [COMECE-AQUI](../COMECE-AQUI.md#4-relógio)).
 4. `pulso import garmin-export …` e/ou `pulso import garmin --days 180` para o histórico.
 5. No Claude Code, dentro de `pulso/`: “como foi minha semana de estresse?”.

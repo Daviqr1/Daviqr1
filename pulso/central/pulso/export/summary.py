@@ -80,7 +80,7 @@ def _final(T, md: str) -> str:
     """The last pseudonym pass over a finished document, line by line, sparing the stamp line."""
     if T is _ident:
         return md
-    return "\n".join(line if line.startswith("Atualizado em:") else T(line) for line in md.split("\n"))
+    return "\n".join(line if line.startswith("Atualizado em:") else T(line, final=True) for line in md.split("\n"))
 
 
 def _titles(conn: sqlite3.Connection) -> dict[str, str]:
@@ -178,14 +178,22 @@ def build_today(conn: sqlite3.Connection, tz: str, today: date, T=_ident) -> str
 
 
 def build_days(conn: sqlite3.Connection, tz: str, today: date, days: int = 60, T=_ident) -> str:
+    from pulso.analysis import local_day_bounds
+
     titles = _titles(conn)
     out = [f"# {TITLES['dias']}", "", _stamp(tz), "",
            "Um bloco por dia, do mais recente para o mais antigo. Unidades explicadas no fim.", ""]
     rows = {r["day"]: r for r in jobs.daily_table(conn, today - timedelta(days=days - 1), today, tz)}
+    # one line per meeting the analysis keeps: not the stale response of a calendar entry that a
+    # transcript now stands for (jobs.dedup_meetings), nor one of an event deleted since
+    a, _ = local_day_bounds(today - timedelta(days=days - 1), tz)
+    _, b = local_day_bounds(today, tz)
+    kept = {e.id for e in jobs.dedup_meetings(store.events(conn, a, b, kinds=["meeting", "calendar"]))}
     responses: dict[str, list] = defaultdict(list)
-    for r in conn.execute("SELECT body FROM artefacts WHERE kind = 'meeting_response'"):
-        m = json.loads(r["body"])
-        responses[m.get("day")].append(m)
+    for r in conn.execute("SELECT key, body FROM artefacts WHERE kind = 'meeting_response'"):
+        if r["key"] in kept:
+            m = json.loads(r["body"])
+            responses[m.get("day")].append(m)
     for k in range(days):
         d = today - timedelta(days=k)
         r = rows.get(d.isoformat())

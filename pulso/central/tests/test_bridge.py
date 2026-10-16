@@ -7,6 +7,7 @@ import tempfile
 import types
 
 import numpy as np
+import pytest
 
 from pulso import store
 from pulso.bridge import frames as FR
@@ -334,7 +335,7 @@ def test_sync_far_from_wall_clock_is_refused():
 
 def test_handshake_and_ack_macs():
     # SEC-1: the watch only trusts a bridge that proves it holds the key, and only acts on an ack
-    # signed for its own nonce, batch and attempt.
+    # signed for its own nonce, batch, attempt and (for a verdict) the exact bytes it signed.
     key, other = FR.blob_key("pulso_dev_a"), FR.blob_key("pulso_dev_b")
     nonce, nonce2 = bytes(range(12)), bytes(range(1, 13))
     assert FR.match_key([other, key], FR.key_id(key)) == key
@@ -343,21 +344,33 @@ def test_handshake_and_ack_macs():
     assert len(hello) == 19 and hello[2] == FR.HELLO_ACK and hello[3:] == FR.hello_proof(key, nonce)
     assert FR.hello_proof(key, nonce2) != hello[3:] and FR.hello_proof(other, nonce) != hello[3:]
     assert FR.hello_ack(3, 25, None, nonce) == bytes((3, 25, FR.HELLO_ACK))
+    mine, theirs = FR.blob_mac(key, 0x01020304, b"{}"), FR.blob_mac(key, 0x01020304, b"[]")
     # domain separation: a HELLO answer can never serve as an ack MAC and vice versa
-    assert FR.hello_proof(key, nonce)[:8] != FR.ack_mac(key, nonce, 0, 0, 0)
+    assert FR.hello_proof(key, nonce)[:8] != FR.ack_mac(key, nonce, 0, 0, 0, mine)
 
-    ack = FR.blob_ack(200, 25, 0x01020304, 6, FR.BLOB_OK, key, nonce)
+    ack = FR.blob_ack(200, 25, 0x01020304, 6, FR.BLOB_OK, key, nonce, mine)
     assert len(ack) == 17 and ack[:9] == bytes((200, 25, 0xB1, 4, 3, 2, 1, 6, 0))
-    assert FR.read_ack(ack, key, nonce, 0x01020304, 6) == FR.BLOB_OK
-    assert FR.read_ack(ack, key, nonce, 0x01020304, 5) is None          # older attempt
-    assert FR.read_ack(ack, key, nonce, 0x01020305, 6) is None          # other batch
-    assert FR.read_ack(ack, key, nonce2, 0x01020304, 6) is None         # other connection
-    assert FR.read_ack(ack, other, nonce, 0x01020304, 6) is None        # look-alike bridge
+    assert FR.read_ack(ack, key, nonce, 0x01020304, 6, mine) == FR.BLOB_OK
+    assert FR.read_ack(ack, key, nonce, 0x01020304, 5, mine) is None          # older attempt
+    assert FR.read_ack(ack, key, nonce, 0x01020305, 6, mine) is None          # other batch
+    assert FR.read_ack(ack, key, nonce2, 0x01020304, 6, mine) is None         # other connection
+    assert FR.read_ack(ack, other, nonce, 0x01020304, 6, mine) is None        # look-alike bridge
+    assert FR.read_ack(ack, key, nonce, 0x01020304, 6, theirs) is None        # verdict on other bytes
     forged = bytearray(ack)
-    forged[8] = FR.BLOB_REJECTED                                         # status flipped
-    assert FR.read_ack(bytes(forged), key, nonce, 0x01020304, 6) is None
-    assert FR.read_ack(ack[:9] + bytes(8), key, nonce, 0x01020304, 6) is None
-    assert FR.read_ack(ack[:12], key, nonce, 0x01020304, 6) is None
+    forged[8] = FR.BLOB_REJECTED                                               # status flipped
+    assert FR.read_ack(bytes(forged), key, nonce, 0x01020304, 6, mine) is None
+    assert FR.read_ack(ack[:9] + bytes(8), key, nonce, 0x01020304, 6, mine) is None
+    assert FR.read_ack(ack[:12], key, nonce, 0x01020304, 6, mine) is None
+    # only "stored"/"rejected" judge content (and must name it); "bad MAC"/"retry" sign zeros there
+    rej = FR.blob_ack(0, 25, 9, 1, FR.BLOB_REJECTED, key, nonce, mine)
+    assert FR.read_ack(rej, key, nonce, 9, 1, mine) == FR.BLOB_REJECTED
+    assert FR.read_ack(rej, key, nonce, 9, 1, theirs) is None
+    for st in (FR.BLOB_BAD_MAC, FR.BLOB_RETRY):
+        a = FR.blob_ack(0, 25, 9, 1, st, key, nonce, theirs)
+        assert a == FR.blob_ack(0, 25, 9, 1, st, key, nonce) and FR.read_ack(a, key, nonce, 9, 1, mine) == st
+    for st in FR.VERDICTS:
+        with pytest.raises(ValueError):
+            FR.blob_ack(0, 25, 9, 1, st, key, nonce)
     # every frame and notification fits the 20-byte limit
     assert len(FR.Encoder().hello(key, nonce)) == 18 and len(FR.Encoder().sync(0, 1)) == 13
 
@@ -490,7 +503,8 @@ def test_serve_handshake_acks_and_survives_bad_input(monkeypatch):
     acks = [n for n in notes if len(n) >= 3 and n[2] == FR.BLOB_ACK]
     # no RETRY for the abandoned attempt; 404 -> RETRY for attempt 2; OK for attempt 3
     att = enc.attempt
-    assert [FR.read_ack(a, key, nonce, 21, a[7]) for a in acks] == [FR.BLOB_RETRY, FR.BLOB_OK]
+    mine = FR.blob_mac(key, 21, payload)
+    assert [FR.read_ack(a, key, nonce, 21, a[7], mine) for a in acks] == [FR.BLOB_RETRY, FR.BLOB_OK]
     assert [a[7] for a in acks] == [(att - 1) & 0xFF, att]
     assert [b["q"] for b in stored] == [21, 21]                # q 20 (before HELLO) never stored
     assert any("disk full" in m for m in logs) and any("antes do HELLO" in m for m in logs)
@@ -550,7 +564,8 @@ def test_relabelled_blob_never_earns_a_signed_reject(monkeypatch):
     notes = _serve(monkeypatch, sink, script)
     acks = [n for n in notes if len(n) >= 3 and n[2] == FR.BLOB_ACK]
     a = state["attempt"]
-    for_8 = [FR.read_ack(n, key, nonce, 8, a) for n in acks if n[3:7] == struct.pack("<I", 8)]
+    mine = FR.blob_mac(key, 8, _batch_json(8))
+    for_8 = [FR.read_ack(n, key, nonce, 8, a, mine) for n in acks if n[3:7] == struct.pack("<I", 8)]
     assert for_8 == [FR.BLOB_BAD_MAC]                       # never REJECTED (nor OK)
     assert stored == [7]
     # the same through handle_blob directly: relabelled -> bad MAC; signed for 8 but naming 7 -> retry
@@ -560,6 +575,63 @@ def test_relabelled_blob_never_earns_a_signed_reject(monkeypatch):
     assert stored == [7]
     # a blob MAC is never a HELLO proof or an ack MAC (distinct labels), whatever q and payload
     assert FR.blob_mac(key, 0x736C7570, b"o-hello" + nonce) != FR.hello_proof(key, nonce)
+
+
+def test_cross_life_replay_never_clears_the_batch_in_flight(monkeypatch):
+    # The q space restarts with the app's Storage (delete + reinstall), and a second watch may run
+    # the same token: a genuine, MAC-valid batch 8 of life A can be replayed while life B (nonce N)
+    # has its own batch 8 in flight. A HELLO(kid, N) written mid-blob (N is on the air) makes the
+    # decoder drop B's blob silently while the link nonce stays N; START(8, a) + A's DATA/END then
+    # get stored and a signed "stored" for (8, a). Watch B must not take that as the fate of its own
+    # batch 8 (it would delete a batch the bridge never got): the verdict names A's blob MAC.
+    from pulso.bridge.peripheral import Sink
+
+    key = FR.blob_key("pulso_dev_" + "z" * 40)
+
+    def body(d: str) -> bytes:
+        return json.dumps({"v": 1, "d": d, "q": 8, "src": "cap", "t": 1_760_630_461,
+                           "rr": [[1_760_630_400_900, [812, 820, 830]]]}).encode()
+
+    pa, pb = body("fr255-cap-aaaaaa"), body("fr255-cap-bbbbbb")
+    stored: list[tuple[str, int]] = []
+    sink = Sink(send=lambda b: (stored.append((b["d"], b["q"])), 200)[1], keys=lambda: [key])
+    recorded = FR.Encoder().blob(8, pa, key)              # life A, sniffed earlier
+    watch, nonce = FR.Encoder(), bytes(range(60, 72))
+    state = {}
+
+    async def script(srv):
+        srv.write(watch.hello(key, nonce))
+        await asyncio.sleep(0.35)
+        wb = watch.blob(8, pb, key)
+        a = state["attempt"] = watch.attempt
+        srv.write(wb[0])
+        srv.write(wb[1])                                   # START + first DATA of B's batch 8
+        inj = FR.Encoder()
+        inj.seq = wb[1][0] + 1
+        srv.write(inj.hello(key, nonce))                   # someone else: HELLO with the watch's nonce
+        for f in wb[2:]:                                   # the rest of B's blob: dropped
+            srv.write(f)
+        seq = wb[-1][0] + 1
+        for f in [bytes((0, FR.BLOB_START)) + struct.pack("<IB", 8, a)] + recorded[1:]:
+            srv.write(bytes((seq & 0xFF,)) + f[1:])
+            seq += 1
+        await asyncio.sleep(0.5)
+        for f in watch.blob(8, pb, key):                   # the watch kept its batch: next attempt
+            srv.write(f)
+        await asyncio.sleep(0.5)
+
+    notes = _serve(monkeypatch, sink, script)
+    acks = [n for n in notes if len(n) >= 3 and n[2] == FR.BLOB_ACK and n[3:7] == struct.pack("<I", 8)]
+    a = state["attempt"]
+    mine, theirs = FR.blob_mac(key, 8, pb), FR.blob_mac(key, 8, pa)
+    replayed = [n for n in acks if n[7] == a]
+    # the bridge did store A's (genuine) batch and said so, but about A's bytes only
+    assert [FR.read_ack(n, key, nonce, 8, a, theirs) for n in replayed] == [FR.BLOB_OK]
+    assert [FR.read_ack(n, key, nonce, 8, a, mine) for n in replayed] == [None]
+    # B's resend is stored and is the only verdict the watch accepts for its batch 8
+    resend = [n for n in acks if n[7] == (a + 1) & 0xFF]
+    assert [FR.read_ack(n, key, nonce, 8, (a + 1) & 0xFF, mine) for n in resend] == [FR.BLOB_OK]
+    assert stored == [("fr255-cap-aaaaaa", 8), ("fr255-cap-bbbbbb", 8)]
 
 
 def test_painel_token_cannot_sign_over_ble(monkeypatch):
@@ -594,3 +666,25 @@ def test_painel_token_cannot_sign_over_ble(monkeypatch):
         hellos = [n for n in notes if len(n) >= 3 and n[2] == FR.HELLO_ACK]
         assert hellos[0] == bytes((0, 25, FR.HELLO_ACK))                  # bare: unknown token
         assert hellos[1][3:] == FR.hello_proof(kdev, nonce)
+
+
+def test_token_hints_are_commands_the_cli_accepts(tmp_path, capsys):
+    # what the bridge (its unknown-token log) and its doc tell the user to run must parse as is:
+    # `token create` requires a label
+    import inspect
+    import pathlib
+    import re
+    import shlex
+
+    from pulso import cli
+    from pulso.bridge import peripheral
+
+    texts = [inspect.getsource(peripheral)]
+    doc = pathlib.Path(__file__).resolve().parents[2] / "docs" / "ponte-ble.md"
+    if doc.exists():
+        texts.append(doc.read_text(encoding="utf-8"))
+    cmds = [c for t in texts for c in re.findall(r"`(pulso token create[^`]*)`", t)]
+    assert len(cmds) >= len(texts)
+    for i, c in enumerate(cmds):
+        assert cli.main(["--db", str(tmp_path / f"{i}.sqlite"), *shlex.split(c)[1:]]) == 0, c
+        assert capsys.readouterr().out.strip().startswith("pulso_"), c

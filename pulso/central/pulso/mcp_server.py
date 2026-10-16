@@ -128,17 +128,15 @@ def build(conn: sqlite3.Connection, tz: str):
     @server.tool()
     def reunioes(inicio: str | None = None, fim: str | None = None, recalcular: bool = False) -> dict:
         """Impacto das reuniões: comparação com os mesmos horários sem reunião (diferença em z, IC95, p),
-        efeito por falante e por tema (trechos etiquetados), piores reuniões e recuperações mais lentas."""
+        efeito por falante e por tema (trechos etiquetados), piores reuniões e recuperações mais lentas.
+        Sempre recalculado na hora (inclui transcrições e dados importados depois); `recalcular` é aceito
+        por compatibilidade e não muda nada."""
         end = _d(fim, today())
         start = _d(inicio, end - timedelta(days=29))
-        key = f"{start.isoformat()}..{end.isoformat()}"
-        _, b = analysis.local_day_bounds(end, tz)
         with lock:
-            # one stored before the period ended (a call earlier today) is missing the later meetings
-            row = conn.execute("SELECT created_ms, body FROM artefacts WHERE kind = 'meetings:summary' AND key = ?", (key,)).fetchone()
-            s = json.loads(row["body"]) if row and row["created_ms"] >= b and not recalcular else None
-            if s is None:
-                s = jobs.meeting_job(conn, start, end, tz)
+            # never a stored summary: one from earlier in the period misses later meetings, and one from
+            # after it misses transcripts or backlogs imported since (0.25 s for 7 days, 0.75 s for 30)
+            s = jobs.meeting_job(conn, start, end, tz)
         return _clean(s)
 
     @server.tool()
@@ -157,8 +155,6 @@ def build(conn: sqlite3.Connection, tz: str):
             m = (ts >= s["start_ms"] + 20_000) & (ts < max(s["end_ms"], s["start_ms"] + 60_000) + 20_000)
             out.append({"hora": F.hhmm(s["start_ms"], tz), "falante": s["speaker"], "texto": s["text"][:300],
                         "etiquetas": s["tags"], "ativacao_z": round(float(np.nanmean(z[m])), 2) if np.any(m) else None})
-        import json
-
         return _clean({"titulo": ev["title"], "inicio": F.hhmm(ev["start_ms"], tz), "fim": F.hhmm(ev["end_ms"], tz),
                        "resposta": resp, "ia": json.loads(ev["attrs"]).get("ai"), "trechos": out,
                        "truncado": len(segs) > 400})

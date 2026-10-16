@@ -60,6 +60,56 @@ def test_cli_end_to_end(tmp_path, capsys):
     assert cli.main(["--db", db, "inventory"]) == 0
 
 
+def test_the_suite_never_uses_the_real_pulso_home(tmp_path):
+    """review r2: cli.main creates PULSO_HOME (default ~/.pulso); conftest gives every test its own."""
+    from pathlib import Path
+
+    assert config.home() == tmp_path / "pulso-home" != Path.home() / ".pulso"
+    assert cli.main(["--db", str(tmp_path / "p.sqlite"), "inventory"]) == 0
+    assert config.home().is_dir()
+
+
+def test_cli_garmin_login_failure_is_one_line(tmp_path, capsys, monkeypatch):
+    """review r2: a first `pulso import garmin` without GARMIN_EMAIL/PASSWORD (or with expired tokens,
+    or without the extra) says what to do in one line and exits 1, without a Python traceback."""
+    from pulso.importers import garmin_connect
+
+    def no_login():
+        raise garmin_connect.GarminLoginError("login no Garmin Connect falhou com os tokens salvos; se expiraram, "
+                                              "defina GARMIN_EMAIL e GARMIN_PASSWORD")
+
+    monkeypatch.setattr(garmin_connect, "_client", no_login)
+    assert cli.main(["--db", str(tmp_path / "p.sqlite"), "import", "garmin", "--days", "1"]) == 1
+    err = capsys.readouterr().err
+    assert err.strip().splitlines() == ["pulso: login no Garmin Connect falhou com os tokens salvos; se expiraram, "
+                                        "defina GARMIN_EMAIL e GARMIN_PASSWORD"]
+
+
+def test_cli_git_import_skips_folders_that_are_not_repositories(tmp_path, capsys):
+    """review r2: `pulso import git ~/code/* --author ...` also matches plain folders and files; each one is
+    skipped with one line on stderr and the repositories after it are still imported."""
+    import subprocess
+
+    plain, repo = tmp_path / "code" / "anotacoes", tmp_path / "code" / "r"
+    plain.mkdir(parents=True)
+    repo.mkdir()
+    (tmp_path / "code" / "LEIA.txt").write_text("x")
+    run = lambda *a: subprocess.run(["git", "-C", str(repo), *a], check=True, capture_output=True)  # noqa: E731
+    run("init", "-q")
+    run("config", "user.name", "Gabi Dev")
+    run("config", "user.email", "g@example.com")
+    (repo / "a.txt").write_text("1\n")
+    run("add", ".")
+    run("commit", "-qm", "feat: primeira")
+    db = str(tmp_path / "p.sqlite")
+    assert cli.main(["--db", db, "import", "git", str(plain), str(tmp_path / "code" / "LEIA.txt"), str(repo),
+                     "--author", "Gabi"]) == 0
+    out, err = capsys.readouterr()
+    assert out.strip() == f"{repo} 1"
+    assert [ln.split(": pulado (")[0] for ln in err.strip().splitlines()] == [str(plain), str(tmp_path / "code" / "LEIA.txt")]
+    assert [e.title for e in store.events(store.connect(db), 0, 2**62, kinds=["commit"])] == ["feat: primeira"]
+
+
 def test_back_to_back_meetings_and_mark_validation():
     from pulso.ai import facts as F
 
@@ -370,3 +420,21 @@ def test_morning_start_syncs_garmin_once_not_twice(tmp_path, monkeypatch):
            execute={"garmin:sync"})
     assert syncs == ["04:00:00/2", "05:00:00/1", "06:00:00/1", "07:00:00/1", "08:00:00/1", "09:00:00/1",
                      "10:00:00/2", "11:00:00/1"]
+
+
+def test_cli_expands_patterns_the_shell_left_as_typed(tmp_path, monkeypatch):
+    """PowerShell/cmd pass `reunioes/*.vtt` and `~/code/*` to pulso unexpanded."""
+    from pulso.cli import _expand
+
+    (tmp_path / "reunioes").mkdir()
+    for n in ("b.vtt", "a.vtt", "c.txt"):
+        (tmp_path / "reunioes" / n).write_text("WEBVTT\n")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    pat = str(tmp_path / "reunioes" / "*.vtt")
+    assert _expand([pat]) == [str(tmp_path / "reunioes" / "a.vtt"), str(tmp_path / "reunioes" / "b.vtt")]
+    assert _expand(["~/reunioes/c.txt"]) == [str(tmp_path / "reunioes" / "c.txt")]
+    assert _expand([str(tmp_path / "nada" / "*.vtt")]) == [str(tmp_path / "nada" / "*.vtt")]   # no match: as typed
+    lit = tmp_path / "reunioes" / "[x].vtt"   # an existing literal path is never re-globbed
+    lit.write_text("WEBVTT\n")
+    assert _expand([str(lit)]) == [str(lit)]
