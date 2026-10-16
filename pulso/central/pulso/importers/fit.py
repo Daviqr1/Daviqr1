@@ -4,7 +4,7 @@ FIT SDK (`garmin-fit-sdk`).
 
 What gets imported (message -> metric):
     monitoring.heart_rate (timestamp_16 expanded)         -> hr                (fit:monitor)
-    monitoring.cycles per activity type (cumulative)      -> steps_pm
+    monitoring.steps (walking/running sub-field, cumulative) -> steps_pm
     monitoring.intensity / active_calories                -> intensity, active_kcal_pm
     stress_level                                           -> stress_garmin (negative codes dropped)
     respiration_rate                                       -> resp_rate
@@ -36,11 +36,9 @@ from pulso import store
 from pulso.store import Event
 
 FIT_EPOCH_UNIX = 631065600
-# monitoring 'cycles' for walking/running after scale: Garmin's profile documents cycles_16 as
-# "2 * cycles (steps)", i.e. one cycle = two steps. Verified against Garmin Connect daily totals
-# in the docs/relogio.md calibration step; change here if your totals disagree.
-STEPS_PER_CYCLE = 2.0
-STEP_ACTIVITY_TYPES = {"walking", "running", "generic"}
+# Device file types missing from the SDK's 'file' enum (numbers from Gadgetbridge's FileType)
+FILE_TYPES = {32: "monitoring_b", 44: "metrics", 48: "hsa_data", 49: "sleep", 68: "hrv_status", 70: "hsa",
+              73: "skin_temp", 4: "activity", 15: "monitoring_a", 28: "monitoring_daily"}
 
 
 def _ms(v) -> int | None:
@@ -96,7 +94,8 @@ class _Collector:
         return None
 
     def _m_file_id(self, m):
-        self.file_type = str(m.get("type") or "")
+        ft = m.get("type")
+        self.file_type = FILE_TYPES.get(ft, str(ft)) if isinstance(ft, int) else str(ft or "")
 
     def _m_monitoring(self, m):
         t = self._t(m)
@@ -107,16 +106,16 @@ class _Collector:
             self.samples[M.HR].append((t, float(hr)))
         if m.get("intensity") is not None:
             self.samples[M.INTENSITY].append((t, float(m["intensity"])))
+        # the profile's 'steps' sub-field of 'cycles' (scale 1) exists for walking/running and is a
+        # per-activity-type counter accumulated through the day
         at = str(m.get("activity_type") or "")
-        cyc = m.get("cycles")
-        if cyc is not None and at in STEP_ACTIVITY_TYPES:
+        steps = m.get("steps")
+        if steps is not None and at in {"walking", "running"}:
             prev = self.cycles_prev.get(at)
-            if prev is not None and cyc >= prev[1] and 0 < t - prev[0] <= 3600_000:
-                steps = (cyc - prev[1]) * STEPS_PER_CYCLE
+            if prev is not None and steps >= prev[1] and 0 < t - prev[0] <= 3600_000:
                 minutes = (t - prev[0]) / 60_000
-                if minutes > 0:
-                    self.samples[M.STEPS_PM].append((t, steps / minutes))
-            self.cycles_prev[at] = (t, float(cyc))
+                self.samples[M.STEPS_PM].append((t, (steps - prev[1]) / minutes))
+            self.cycles_prev[at] = (t, float(steps))
         if m.get("active_calories") is not None:
             self.samples["active_kcal_cum"].append((t, float(m["active_calories"])))
 
@@ -125,6 +124,10 @@ class _Collector:
         v = m.get("stress_level_value")
         if t is not None and v is not None and 0 <= v <= 100:
             self.samples[M.STRESS_GARMIN].append((t, float(v)))
+        # undocumented field 3 ("body_energy" in Gadgetbridge's profile) is Body Battery
+        bb = m.get("body_energy", m.get(3, m.get("3")))
+        if t is not None and isinstance(bb, (int, float)) and 0 <= bb <= 100:
+            self.samples[M.BODY_BATTERY].append((t, float(bb)))
 
     def _m_respiration_rate(self, m):
         t = self._t(m)

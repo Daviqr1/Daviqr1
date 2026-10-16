@@ -5,8 +5,14 @@ sleep stages, Body Battery, all-day stress at 3 min) and the official Health/Act
 closed to new applicants. Trade-off: it is unofficial, can break when Garmin changes endpoints,
 and automated access may conflict with Garmin's terms — keep the sync infrequent (daily).
 
-Auth: first run uses GARMIN_EMAIL / GARMIN_PASSWORD (MFA prompt in the terminal); tokens are
-stored in $PULSO_GARMIN_TOKENS (default ~/.garminconnect) and reused afterwards.
+Auth (garminconnect >= 0.3, no longer garth): first run uses GARMIN_EMAIL / GARMIN_PASSWORD
+(MFA prompt in the terminal); the library stores tokens in $PULSO_GARMIN_TOKENS (default
+~/.garminconnect) and refreshes them afterwards.
+
+Besides the JSON endpoints, each day's raw wellness FIT zip (the same Monitor/Sleep/HRV files the
+watch uploads) is downloaded, archived under $PULSO_ARCHIVE and decoded by `importers.fit` —
+the raw files are the source of truth and can be re-decoded as Garmin documents more messages.
+Intraday cloud data older than ~6 months goes to cold storage: sync at least weekly.
 
 Every parser is tolerant: a payload whose shape changed is skipped and reported, never fatal.
 """
@@ -149,18 +155,34 @@ def _client():
     except ImportError as e:  # pragma: no cover
         raise SystemExit("pip install 'pulso[garmin]' para sincronizar com o Garmin Connect") from e
     tokens = os.environ.get("PULSO_GARMIN_TOKENS", str(Path.home() / ".garminconnect"))
+    email, pw = os.environ.get("GARMIN_EMAIL"), os.environ.get("GARMIN_PASSWORD")
+    g = Garmin(email, pw, prompt_mfa=lambda: input("código MFA da Garmin: "))
     try:
-        g = Garmin()
-        g.login(tokens)
-        return g
-    except Exception:
-        email, pw = os.environ.get("GARMIN_EMAIL"), os.environ.get("GARMIN_PASSWORD")
+        g.login(tokens)  # loads saved tokens, or logs in with the credentials and saves them
+    except Exception as e:
         if not (email and pw):
-            raise SystemExit("defina GARMIN_EMAIL e GARMIN_PASSWORD no primeiro login (os tokens ficam salvos depois)")
-        g = Garmin(email, pw, prompt_mfa=lambda: input("código MFA da Garmin: "))
-        g.login()
-        g.garth.dump(tokens)  # garth persists the OAuth tokens for the next runs
-        return g
+            raise SystemExit("defina GARMIN_EMAIL e GARMIN_PASSWORD no primeiro login (os tokens ficam salvos depois)") from e
+        raise
+    return g
+
+
+def archive_wellness(g, day: str) -> list[Path]:
+    """Download the day's raw wellness FIT zip and keep the files (returns extracted paths)."""
+    import io
+    import zipfile
+
+    root = Path(os.environ.get("PULSO_ARCHIVE", "data/fit-archive")) / day
+    blob = g.download_health_snapshot(day)  # despite the name: /download-service/files/wellness/{day}
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "wellness.zip").write_bytes(blob)
+    out = []
+    with zipfile.ZipFile(io.BytesIO(blob)) as z:
+        for name in z.namelist():
+            if name.lower().endswith(".fit") and Path(name).name:
+                p = root / Path(name).name  # basename only: no path traversal from the zip
+                p.write_bytes(z.read(name))
+                out.append(p)
+    return out
 
 
 def store_day(conn: sqlite3.Connection, series: dict[str, list], epochs: list, events: list[Event]) -> dict[str, int]:
@@ -212,5 +234,15 @@ def sync(conn: sqlite3.Connection, days: int = 7, tz: str | None = None, client=
             events += ev
         except Exception as e:
             problems.append(f"sleep: {e!r}"[:200])
-        report[d] = {"stored": store_day(conn, series, epochs, events), "problems": problems}
+        stored = store_day(conn, series, epochs, events)
+        try:
+            from pulso.importers import fit
+
+            files = archive_wellness(g, d)
+            if files:
+                stored["fit_files"] = len(files)
+                fit.import_paths(conn, [str(f) for f in files])
+        except Exception as e:
+            problems.append(f"wellness_fit: {e!r}"[:200])
+        report[d] = {"stored": stored, "problems": problems}
     return report

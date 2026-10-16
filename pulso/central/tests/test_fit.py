@@ -53,7 +53,8 @@ def test_monitoring_file(tmp_path):
     _, st = store.series(conn, M.STRESS_GARMIN, 0, 2**62)
     assert st.tolist() == [42]
     _, steps = store.series(conn, M.STEPS_PM, 0, 2**62)
-    assert steps.tolist() == [pytest.approx(50 * fit.STEPS_PER_CYCLE / 10)]
+    # cycles 100 -> 150 (scale 2) is raw 200 -> 300, decoded through the 'steps' sub-field
+    assert steps.tolist() == [pytest.approx(100 / 10)]
     _, rsp = store.series(conn, M.RESP_RATE, 0, 2**62)
     assert rsp.tolist() == [pytest.approx(14.5)]
     # idempotent by content hash
