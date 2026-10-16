@@ -1,0 +1,17 @@
+{$PULSO_DOMAIN} {
+	encode zstd gzip
+	# ingestão do relógio e estado do mostrador
+	handle /v1/* {
+		reverse_proxy api:8080
+	}
+	handle /health {
+		reverse_proxy api:8080
+	}
+	# MCP (Bearer PULSO_MCP_TOKEN verificado pelo próprio servidor)
+	handle /mcp* {
+		reverse_proxy mcp:8765
+	}
+	handle {
+		respond 404
+	}
+}

@@ -93,6 +93,9 @@ def main(argv: list[str] | None = None) -> int:
         b.add_argument("--central", help="URL da central (senão grava direto no banco local)")
         b.add_argument("--token", help="token de aparelho para a central")
 
+    dm = sub.add_parser("daemon", help="jobs periódicos: reanálise, Garmin Connect, relatórios")
+    dm.add_argument("--once", action="store_true", help="uma passada e sai (útil para testar)")
+
     sub.add_parser("inventory", help="o que existe no banco")
 
     args = p.parse_args(argv)
@@ -202,6 +205,12 @@ def main(argv: list[str] | None = None) -> int:
             on_batch = (lambda b: None) if args.probe else sink
             asyncio.run(stream(args.name, on_batch, device_id=f"hrm-{args.name.lower().replace(' ', '-')}",
                                seconds=secs, src="strap"))
+        return 0
+
+    if args.cmd == "daemon":
+        from pulso import scheduler
+
+        scheduler.loop(config.Settings(db_path=db_path, tz=tz), once=args.once)
         return 0
 
     if args.cmd == "inventory":
