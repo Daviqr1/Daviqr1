@@ -150,6 +150,71 @@ def sleep_job(conn: sqlite3.Connection, start: date, end: date, tz: str, need_mi
     return nights
 
 
+# ----------------------------------------------------------------------------- daily table
+
+DAILY_COLUMNS = (
+    "arousal_mean", "arousal_min_above_1_5", "episodes", "episodes_mental", "sleep_h", "sleep_debt_min",
+    "hrv_ms", "hr_nadir", "meetings", "meeting_minutes", "commits", "late_commits", "marks",
+)
+
+
+def daily_table(conn: sqlite3.Connection, start: date, end: date, tz: str) -> list[dict]:
+    """One row per local day with everything that can be crossed: physiology, sleep (the night
+    that ended that morning), agenda load and coding behaviour. Missing = None."""
+    rows = []
+    d = start
+    while d <= end:
+        a, b = analysis.local_day_bounds(d, tz)
+        day = store.get_artefact(conn, "analysis:day", d.isoformat()) or {}
+        night = store.get_artefact(conn, "sleep:night", d.isoformat()) or {}
+        meets = store.events(conn, a, b, kinds=["meeting", "calendar"])
+        commits = store.events(conn, a, b, kinds=["commit"])
+        late = 0
+        for c in commits:
+            h = datetime.fromtimestamp(c.start_ms / 1000, tz=timezone.utc).astimezone(ZoneInfo(tz)).hour
+            late += h >= 22 or h < 5
+        eps = day.get("episodes") or []
+        rows.append({
+            "day": d.isoformat(),
+            "arousal_mean": day.get("arousal_mean_awake"),
+            "arousal_min_above_1_5": day.get("arousal_minutes_above_1_5"),
+            "episodes": len(eps) if day else None,
+            "episodes_mental": sum(1 for e in eps if e["kind"] == "mental") if day else None,
+            "sleep_h": round(night["total_sleep_min"] / 60, 2) if night.get("total_sleep_min") else None,
+            "sleep_debt_min": night.get("debt_min"),
+            "hrv_ms": night.get("hrv_ms"),
+            "hr_nadir": night.get("hr_nadir"),
+            "meetings": len(meets),
+            "meeting_minutes": int(sum((min(e.end_ms, b) - max(e.start_ms, a)) / MIN for e in meets)),
+            "commits": len(commits),
+            "late_commits": late,
+            "marks": len(store.events(conn, a, b, kinds=["note"])),
+        })
+        d += timedelta(days=1)
+    return rows
+
+
+def correlate_daily(rows: list[dict], a: str, b: str, lag_days: int = 0, seed: int = 0) -> dict:
+    """Spearman correlation between column a on day t and column b on day t+lag, with a
+    permutation p-value. lag 1 answers 'does today's X go with tomorrow's Y?'."""
+    x = [r.get(a) for r in rows]
+    y = [r.get(b) for r in rows]
+    if lag_days:
+        x, y = x[:-lag_days], y[lag_days:]
+    pairs = [(u, v) for u, v in zip(x, y) if u is not None and v is not None]
+    if len(pairs) < 6:
+        return {"n": len(pairs), "rho": None, "p": None, "note": "menos de 6 dias com os dois dados"}
+    from scipy.stats import rankdata
+
+    xr = rankdata([p[0] for p in pairs])
+    yr = rankdata([p[1] for p in pairs])
+    rho = float(np.corrcoef(xr, yr)[0, 1]) if np.std(xr) > 0 and np.std(yr) > 0 else float("nan")
+    rng = np.random.default_rng(seed)
+    null = np.array([np.corrcoef(xr, rng.permutation(yr))[0, 1] for _ in range(2000)])
+    p = float((np.sum(np.abs(null) >= abs(rho)) + 1) / (null.size + 1)) if not math.isnan(rho) else None
+    return {"n": len(pairs), "rho": _n(rho), "p": _n(p), "lag_days": lag_days, "a": a, "b": b}
+
+
 # ------------------------------------------------------------------------------ everything
 
 

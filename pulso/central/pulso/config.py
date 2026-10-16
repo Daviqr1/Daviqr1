@@ -14,7 +14,8 @@ class Settings:
     # Claude
     anthropic_api_key: str | None = field(default_factory=lambda: os.environ.get("ANTHROPIC_API_KEY"))
     report_model: str = field(default_factory=lambda: os.environ.get("PULSO_REPORT_MODEL", "claude-opus-5-5"))
-    tagger_model: str = field(default_factory=lambda: os.environ.get("PULSO_TAGGER_MODEL", "claude-haiku-5-5"))
+    # tagging is many small requests: same model at low effort by default; override to trade quality for cost
+    tagger_model: str = field(default_factory=lambda: os.environ.get("PULSO_TAGGER_MODEL", "claude-opus-5-5"))
     # MCP over HTTP
     mcp_token: str | None = field(default_factory=lambda: os.environ.get("PULSO_MCP_TOKEN"))
     # how often the face asks for a recompute of the current day (seconds)
