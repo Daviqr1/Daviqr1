@@ -5,7 +5,8 @@ from __future__ import annotations
 
 # --- raw / vendor metrics -------------------------------------------------------------
 HR = "hr"                          # bpm
-STRESS_GARMIN = "stress_garmin"    # 0..100 (Garmin/Firstbeat); negative "unmeasurable" codes are dropped
+STRESS_GARMIN = "stress_garmin"    # 0..100 (Garmin/Firstbeat), ~3-min; negative "unmeasurable" codes are dropped
+STRESS_NOW = "stress_now"          # 0..100 ActivityMonitor.stressScore (30-s rolling), snapshots from the watch
 BODY_BATTERY = "body_battery"      # 0..100
 SPO2 = "spo2"                      # %
 RESP_RATE = "resp_rate"            # breaths/min (Garmin)

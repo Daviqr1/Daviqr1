@@ -62,6 +62,23 @@ def best_minute_series(conn: sqlite3.Connection, metric: str, start_ms: int, end
     return out
 
 
+def steps_from_cumulative(conn: sqlite3.Connection, start_ms: int, end_ms: int) -> np.ndarray:
+    """Steps/min spread evenly between consecutive daily-counter snapshots from the watch
+    (ActivityMonitor.steps, reset at midnight). Gaps over 30 min stay NaN."""
+    bins = grid(start_ms, end_ms)
+    out = np.full(bins.size, np.nan)
+    ts, v = store.series(conn, "steps_day_total", start_ms - 30 * MIN, end_ms)
+    for (t0, a), (t1, b) in zip(zip(ts[:-1], v[:-1]), zip(ts[1:], v[1:])):
+        dt_min = (t1 - t0) / MIN
+        if dt_min <= 0 or dt_min > 30 or b < a:  # b < a: midnight reset
+            continue
+        i0 = max(0, int((t0 - bins[0]) // MIN))
+        i1 = min(bins.size, int((t1 - bins[0]) // MIN))
+        if i1 > i0:
+            out[i0:i1] = (b - a) / dt_min
+    return out
+
+
 def sleep_mask(conn: sqlite3.Connection, bins: np.ndarray) -> np.ndarray:
     """True for minutes inside any sleep epoch (any source) or 'sleep' event."""
     m = np.zeros(bins.size, dtype=bool)
@@ -160,6 +177,8 @@ def analyze_day(conn: sqlite3.Connection, day: date, tz: str, write: bool = True
     bins_all = grid(fit_start, end)
     hr_all = best_minute_series(conn, M.HR, fit_start, end)
     steps_all = best_minute_series(conn, M.STEPS_PM, fit_start, end, preference=(M.SRC_FIT, M.SRC_GC, M.SRC_CIQ_FACE))
+    steps_watch = steps_from_cumulative(conn, fit_start, end)
+    steps_all = np.where(np.isnan(steps_all), steps_watch, steps_all)
     hours_all, _ = baseline.local_hours(bins_all, tz)
     asleep_all = sleep_mask(conn, bins_all)
     day_sl = slice(int((start - bins_all[0]) // MIN), int((end - bins_all[0]) // MIN))
@@ -188,6 +207,9 @@ def analyze_day(conn: sqlite3.Connection, day: date, tz: str, write: bool = True
 
     # --- Garmin stress channel (standardised against trailing awake history) -------------
     stress_all = best_minute_series(conn, M.STRESS_GARMIN, fit_start, end, preference=(M.SRC_FIT, M.SRC_GC, M.SRC_CIQ_FACE))
+    # live 30-s stress snapshots from the watch fill minutes the 3-min series doesn't cover yet
+    stress_now = best_minute_series(conn, M.STRESS_NOW, fit_start, end, preference=(M.SRC_CIQ_CAPTURE, M.SRC_CIQ_FACE))
+    stress_all = np.where(np.isnan(stress_all), stress_now, stress_all)
     ref = stress_all[: day_sl.start][~asleep_all[: day_sl.start]]
     stress_z = _robust_z(stress_all[day_sl], ref if ref.size else stress_all[day_sl])
     stress_z = np.where(asleep_all[day_sl], np.nan, stress_z)
