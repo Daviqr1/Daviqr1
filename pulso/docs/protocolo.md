@@ -76,7 +76,7 @@ Notas para o Monkey C:
 | `slp` / `sd` | int | sono da última noite (min) / débito de sono (min) |
 | `hrv` / `hrvs` | int / str | HRV noturna (ms) / `below` `normal` `above` `insufficient` |
 | `nm` | obj | próxima reunião `{t: "15:00", ti: "Planning", r: 0..3}` (r = carga prevista) |
-| `msg` | str | insight curto do dia (≤ 48 chars) |
-| `al` | obj | alerta novo `{i: id numérico estável, m: texto ≤ 60}` — mostrar uma vez como notificação nativa (`Notifications.showNotification`, API 5.1.0) e lembrar o último `i` mostrado |
+| `msg` | str | insight curto do dia (≤ 48 chars, números verificados): a linha do relatório das 06:30 sobre ontem, guardada para hoje |
+| `al` | obj | alertas dos últimos 30 min `{i: id numérico estável do mais novo, m: texto ≤ 60}` — mostrar uma vez como notificação nativa (`Notifications.showNotification`, API 5.1.0) e lembrar o último `i` mostrado. Todo alerta novo muda `i`; um alerta antigo saindo da janela não muda. Com mais de um alerta na janela, `m` é o texto do mais novo com o sufixo ` (+N)` (N outros alertas na janela, ex.: dois disparados na mesma avaliação; os textos estão no resumo e no MCP) |
 
 `GET /v1/face` devolve o mesmo objeto sem enviar dados.

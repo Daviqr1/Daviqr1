@@ -90,9 +90,11 @@ def ingest(conn: sqlite3.Connection, b: Batch, now_ms: int | None = None) -> dic
             rows = [((t0 + i * step) * 1000, float(v)) for i, v in enumerate(vals) if v is not None and _valid("pressure_pa", float(v))]
             counts["pressure_pa"] = counts.get("pressure_pa", 0) + store.insert_samples(conn, M.PRESSURE_PA, src, rows)
 
+        # id keyed on (d, q), the batch's idempotency key, not on t: the capture app seals a 'stop'
+        # and opens the next session's 'start' in the same second, both at index 0 of their batch
         for i, (t, kind, label) in enumerate(b.ev):
             store.upsert_event(conn, Event(
-                id=f"mark:{b.d}:{t}:{i}", kind="note", start_ms=int(t) * 1000, end_ms=int(t) * 1000,
+                id=f"mark:{b.d}:{b.q}:{i}", kind="note", start_ms=int(t) * 1000, end_ms=int(t) * 1000,
                 title=label[:120], source=f"watch:{b.src}", attrs={"kind": kind[:32]},
             ))
 

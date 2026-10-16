@@ -1,5 +1,12 @@
 # per-developer build-time settings (central URL, device token): never commit
 local/
+# build output (the .prg and -settings.json of a sideload build carry the token)
 bin/
+gen/
+mir/
+internal-mir/
 *.prg
 *.prg.debug.xml
+*.iq
+*-settings.json
+*-fit_contributions.json

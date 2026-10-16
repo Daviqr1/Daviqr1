@@ -16,11 +16,19 @@ def _day(d=date(2026, 10, 7)):
     return a
 
 
+def _steps_counter(conn, now, spm, minutes=40):
+    """What live ingest gives: the face's cumulative daily step counter every 5 min (no steps_pm)."""
+    t0 = now - minutes * MIN
+    store.insert_samples(conn, "steps_day_total", M.SRC_CIQ_FACE,
+                         [(t0 + k * 5 * MIN, 3000.0 + spm * 5 * k) for k in range(minutes // 5 + 1)])
+
+
 def test_sustained_arousal_alert_with_cooldown():
     conn = store.connect(":memory:")
     a = _day()
     now = a + 15 * 60 * MIN
     store.upsert_samples(conn, M.AROUSAL_Z, M.DERIVED, [(now - k * MIN, 2.6) for k in range(10)])
+    _steps_counter(conn, now + 15 * MIN, 0)  # sitting: the counter does not move
     fired = alerts.evaluate(conn, now, TZ)
     assert [f.kind for f in fired] == ["agora"]
     st = face_state(conn, now, TZ)
@@ -36,6 +44,53 @@ def test_no_arousal_alert_when_moving():
     store.upsert_samples(conn, M.AROUSAL_Z, M.DERIVED, [(now - k * MIN, 2.6) for k in range(10)])
     store.insert_samples(conn, M.STEPS_PM, "fit", [(now - k * MIN, 120.0) for k in range(10)])
     assert alerts.evaluate(conn, now, TZ) == []
+
+
+def test_no_arousal_alert_while_running_with_only_live_data():
+    """F6: live uploads carry no steps_pm, only the cumulative counter (and ENMO from the capture
+    app); a run is movement, not stillness, and no movement data at all is not stillness either."""
+    conn = store.connect(":memory:")
+    now = _day() + 18 * 60 * MIN + 25 * MIN
+    store.upsert_samples(conn, M.AROUSAL_Z, M.DERIVED, [(now - k * MIN, 14.0) for k in range(10)])
+    assert alerts.evaluate(conn, now, TZ) == []  # no movement data at all
+    _steps_counter(conn, now, 165)
+    assert alerts.evaluate(conn, now, TZ) == []  # running, seen through the daily counter
+
+    conn = store.connect(":memory:")
+    store.upsert_samples(conn, M.AROUSAL_Z, M.DERIVED, [(now - k * MIN, 14.0) for k in range(10)])
+    store.insert_samples(conn, M.ENMO, M.SRC_CIQ_CAPTURE, [(now - 600_000 + k * 1000, 180.0) for k in range(600)])
+    assert alerts.evaluate(conn, now, TZ) == []  # capture app's accelerometer says moving
+
+    conn = store.connect(":memory:")
+    store.upsert_samples(conn, M.AROUSAL_Z, M.DERIVED, [(now - k * MIN, 14.0) for k in range(10)])
+    _steps_counter(conn, now, 0)
+    store.upsert_event(conn, Event("mark:w:1:0", "note", now - 30 * MIN, now - 30 * MIN, "start:treino", "watch:cap",
+                                   {"kind": "cap"}))
+    assert alerts.evaluate(conn, now, TZ) == []  # TREINO session open (strength work: still, but exercise)
+    store.upsert_event(conn, Event("mark:w:2:0", "note", now - 15 * MIN, now - 15 * MIN, "stop:user", "watch:cap",
+                                   {"kind": "cap"}))
+    assert [f.kind for f in alerts.evaluate(conn, now, TZ)] == ["agora"]
+
+
+def test_switch_to_treino_in_the_same_second_counts_as_exercise():
+    """verify N2: a mode switch on the watch (FOCO -> TREINO) writes 'stop:switch' and 'start:treino'
+    with the same timestamp, the stop stored first; the session that is open is the TREINO one."""
+    conn = store.connect(":memory:")
+    now = _day() + 18 * 60 * MIN + 25 * MIN
+    store.upsert_samples(conn, M.AROUSAL_Z, M.DERIVED, [(now - k * MIN, 14.0) for k in range(10)])
+    _steps_counter(conn, now, 0)  # strength / indoor bike: the counter barely moves
+    t = now - 30 * MIN
+    for eid, at, title in (("mark:w:1:0", t - 3600_000, "start:foco"), ("mark:w:7:0", t, "stop:switch rr=1 ok=1"),
+                           ("mark:w:8:0", t, "start:treino")):
+        store.upsert_event(conn, Event(eid, "note", at, at, title, "watch:cap", {"kind": "cap"}))
+    assert alerts._exercising(conn, now)
+    assert alerts.evaluate(conn, now, TZ) == []
+    # switching back to FOCO the same way closes the exercise
+    store.upsert_event(conn, Event("mark:w:9:0", "note", now - 5 * MIN, now - 5 * MIN, "stop:switch rr=1 ok=1",
+                                   "watch:cap", {"kind": "cap"}))
+    store.upsert_event(conn, Event("mark:w:10:0", "note", now - 5 * MIN, now - 5 * MIN, "start:foco", "watch:cap",
+                                   {"kind": "cap"}))
+    assert not alerts._exercising(conn, now)
 
 
 def test_heavy_meeting_and_back_to_back_alerts():
@@ -114,6 +169,7 @@ def test_alert_level_line():
     store.put_artefact(conn, "sleep:last", "latest", {"debt_min": 400, "hrv_status": "normal"})
     assert summary.alert_level(conn, now)[0] == "ATENÇÃO"
     store.upsert_samples(conn, M.AROUSAL_Z, M.DERIVED, [(now - k * MIN, 2.6) for k in range(10)])
+    _steps_counter(conn, now, 0)
     alerts.evaluate(conn, now, TZ)
     lvl, why = summary.alert_level(conn, now + MIN)
     assert lvl == "ALTO" and "Ativação alta" in why

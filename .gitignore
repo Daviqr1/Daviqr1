@@ -1,0 +1,11 @@
+# Connect IQ build output (a sideload build of pulso/watch/* bakes the device token into the .prg
+# and into <name>-settings.json), keys and per-developer config: never commit, whatever -o said
+*.prg
+*.prg.debug.xml
+*.iq
+*-settings.json
+*-fit_contributions.json
+internal-mir/
+developer_key*
+*.der
+*.pem

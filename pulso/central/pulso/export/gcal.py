@@ -2,7 +2,9 @@
 
 No program can push into the Gemini app; a Calendar event with a popup reminder at minute 0 is the
 Google-native push a program *can* trigger, and Gemini can also read it later. One event per alert
-id (idempotent), 5 minutes long, starting a minute from now, with a link to the 'Hoje' Doc.
+id (idempotent), 5 minutes long, starting a minute from now; `doc_url`, when a caller passes one,
+adds a link (the scheduler and the ingest server do not). The text is the alert's as is: not
+pseudonymised (a meeting alert carries the meeting title).
 """
 
 from __future__ import annotations

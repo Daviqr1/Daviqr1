@@ -19,7 +19,9 @@ def conn():
     return store.connect(":memory:")
 
 
-def _fill_days(conn, first: date, n_days: int, meeting_day: date, seed=0):
+def _fill_days(conn, first: date, n_days: int, meeting_day: date, seed=0, rr_history=False):
+    """Synthetic days; RR only during the meeting day's afternoon unless `rr_history` adds a calm
+    half hour of RR every other afternoon (history the HRV channel can be standardised against)."""
     rng = np.random.default_rng(seed)
     for k in range(n_days):
         d = date.fromordinal(first.toordinal() + k)
@@ -44,6 +46,11 @@ def _fill_days(conn, first: date, n_days: int, meeting_day: date, seed=0):
             span = (rts >= ts[i0]) & (rts < ts[i0 + 50])
             rr = np.where(span, 700 + (rr - 850) * 0.25, rr)
             store.insert_rr(conn, M.SRC_CIQ_CAPTURE, zip(rts.tolist(), rr.round().astype(int).tolist()))
+        elif rr_history:
+            i0 = 12 * 60
+            steps[i0 - 5 : i0 + 40] = 0
+            rts, rr = rr_series(n=2000, mean_rr=850, hf_amp=35, noise_sd=4, t0_ms=int(ts[i0]), seed=100 + k)
+            store.insert_rr(conn, M.SRC_CIQ_CAPTURE, zip(rts.tolist(), rr.round().astype(int).tolist()))
         hr += rng.normal(0, 2, ts.size)
         stress[(steps > 0) | asleep] = np.nan  # Garmin blanks stress while moving
         store.insert_samples(conn, M.HR, M.SRC_FIT, zip(ts.tolist(), hr.tolist()))
@@ -57,7 +64,7 @@ def _fill_days(conn, first: date, n_days: int, meeting_day: date, seed=0):
 def test_day_pipeline_finds_meeting_episode(conn):
     first = date(2026, 9, 20)
     target = date(2026, 10, 5)
-    _fill_days(conn, first, 16, target)
+    _fill_days(conn, first, 16, target, rr_history=True)
     res = analysis.analyze_day(conn, target, TZ)
     s = res.summary()
     assert s["minutes_with_hr"] > 1000
@@ -128,3 +135,67 @@ def test_moving_rr_windows_do_not_feed_stress(conn):
     store.insert_samples(conn, M.ENMO, M.SRC_CIQ_CAPTURE, rows)
     res = analysis.analyze_day(conn, target, TZ, write=False)
     assert any("moving" in n for n in res.notes)
+
+
+def test_rr_from_two_sources_is_never_merged():
+    """F3: the capture upload and the session FIT's developer field carry the same beats (here 0.4 s
+    apart); strap and wrist on the same night too. One source per minute, strap first."""
+    from synth import rmssd
+
+    a, b = analysis.local_day_bounds(date(2026, 10, 14), TZ)
+    ts, rr = rr_series(n=1500, mean_rr=850, hf_amp=35, noise_sd=4, t0_ms=a + 10 * 3600_000, seed=3)
+    rri = rr.round().astype(int)
+
+    def median_rmssd(*copies):
+        c = store.connect(":memory:")
+        for src, shift in copies:
+            store.insert_rr(c, src, zip((ts + shift).tolist(), rri.tolist()))
+        return float(np.nanmedian(analysis.hrv_minutes(c, a, b)[M.RMSSD])), c
+
+    alone, _ = median_rmssd((M.SRC_CIQ_CAPTURE, 0))
+    both, c = median_rmssd((M.SRC_CIQ_CAPTURE, 0), ("fit:activity", 400))
+    assert alone == pytest.approx(rmssd(rri.astype(float)), rel=0.25)
+    assert both == pytest.approx(alone, rel=0.02)  # merged, it fell ~30 %
+    # the strap wins wherever it covers the minute; the wrist fills the rest
+    c = store.connect(":memory:")
+    store.insert_rr(c, M.SRC_CIQ_CAPTURE, zip(ts.tolist(), rri.tolist()))
+    strap = ts < ts[0] + 10 * MIN
+    store.insert_rr(c, M.SRC_STRAP, zip((ts[strap] + 150).tolist(), rri[strap].tolist()))
+    bts, brr = analysis.best_rr(c, a, b)
+    assert np.all(np.diff(bts) > 0) and bts.size < ts.size + 20
+    assert np.isin(ts[strap][5:-80] + 150, bts).all()  # strap beats kept inside its minutes
+    assert not np.isin(ts[strap][5:-80], bts).any()    # and the wrist copy of them dropped
+
+
+def test_unobserved_minutes_are_not_scored(conn, monkeypatch):
+    """F4: the fused state decays to 0 z where no channel observes; those minutes (an off-wrist
+    afternoon, the rest of today) are not persisted nor averaged."""
+    first, target = date(2026, 9, 20), date(2026, 10, 5)
+    _fill_days(conn, first, 16, target)
+    a, b = analysis.local_day_bounds(target, TZ)
+    off0, off1 = a + 16 * 60 * MIN, a + 19 * 60 * MIN  # watch on the charger 16:00-19:00
+    conn.execute("DELETE FROM samples WHERE ts_ms >= ? AND ts_ms < ?", (off0, off1))
+    res = analysis.analyze_day(conn, target, TZ)
+    i0, i1 = (off0 - a) // MIN, (off1 - a) // MIN
+    assert np.isnan(res.arousal[i0 + 15 : i1 - 15]).all()
+    ts, _ = store.series(conn, M.AROUSAL_Z, off0 + 15 * MIN, off1 - 15 * MIN, source=M.DERIVED)
+    assert ts.size == 0
+    # 'today' analysed at 11:00: nothing after now is written or counted
+    now = a + 11 * 60 * MIN
+    monkeypatch.setattr(store, "now_ms", lambda: now)
+    s = analysis.analyze_day(conn, target, TZ).summary()
+    ts, z = store.series(conn, M.AROUSAL_Z, now + MIN, b, source=M.DERIVED)
+    assert ts.size == 0
+    assert s["minutes_awake_scored"] <= (now - a) // MIN - 7 * 60 + 1
+    _, z = store.series(conn, M.AROUSAL_Z, a, now + MIN, source=M.DERIVED)
+    assert s["arousal_mean_awake"] == pytest.approx(float(np.mean(z)), abs=1e-6)
+
+
+def test_hrv_channel_is_never_standardised_against_the_day_itself(conn):
+    """F17: with no RR history the HRV channel is left out (and said so), not z-scored in-sample."""
+    first, target = date(2026, 9, 20), date(2026, 10, 5)
+    _fill_days(conn, first, 16, target)  # RR only on the target day
+    res = analysis.analyze_day(conn, target, TZ, write=False)
+    assert "rr_hrv" not in res.channel_r
+    assert any("HRV channel left out" in n for n in res.notes)
+    assert np.isfinite(res.hrv[M.LN_RMSSD]).sum() > 30  # the windows themselves are still there

@@ -1,6 +1,7 @@
 """Read-only dashboard served by the central at /painel (self-contained HTML, no CDN: health data
-pages should not pull third-party code). Auth: the same device bearer token, kept in the
-browser's localStorage and sent as a header by the page's fetch calls."""
+pages should not pull third-party code). Auth: a painel-scoped bearer token (`pulso token create
+<label> --painel`), kept in the browser's localStorage and sent as a header by the page's fetch
+calls. The watch's device token is refused here: it lives on the watch and in build artefacts."""
 
 from __future__ import annotations
 

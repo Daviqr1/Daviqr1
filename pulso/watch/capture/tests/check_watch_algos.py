@@ -2,7 +2,10 @@
 
 These are hand transliterations of the Monkey C code (float32 where the watch uses Float), run
 against the central's reference implementations and simple simulations. Keep them in sync with
-source/HrvLive.mc, AccelFeatures.mc, BatchBuilder.mc, Governor.mc, BleLink.mc and Json.mc.
+source/HrvLive.mc, AccelFeatures.mc, BatchBuilder.mc, Governor.mc, BleLink.mc and Json.mc (for
+BleLink: frame layout, HELLO and its proof, the blob MAC over q, the signed blob ack and its
+attempt check, the stream type filter and the time base reset on HELLO, all against the bridge's
+real decoder in central/pulso/bridge/frames.py and handle_blob in peripheral.py).
 
     python3 watch/capture/tests/check_watch_algos.py      (needs numpy + pydantic for the wire test)
 """
@@ -267,9 +270,11 @@ def test_history_size() -> None:
 
 
 # ---- BleLink (frames) + Json (blob body) vs the bridge decoder ----------------------------------------
-def watch_unit(t0_ms: int, sync_ms: int, xyz: list[tuple[int, int, int]], period: int, hint: int = 25) -> list[bytearray]:
+def watch_unit(t0_ms: int, sync_ms: int, xyz: list[tuple[int, int, int]], period: int, hint: int = 25,
+               sid: int = 1) -> list[bytearray]:
     """BleLink.pushAccel: ACC_KEY + ACC_DELTA frames for one sensor callback (seq left at 0);
-    above `hint` Hz, groups of k = ceil(rate / hint) samples are averaged (Monkey C integer division)."""
+    above `hint` Hz, groups of k = ceil(rate / hint) samples are averaged (Monkey C integer division).
+    Every ACC_KEY repeats the id of the SYNC it is timed against."""
     n = len(xyz)
     rate = (n + period // 2) // period
     k = (rate + hint - 1) // hint if rate > hint else 1
@@ -305,13 +310,14 @@ def watch_unit(t0_ms: int, sync_ms: int, xyz: list[tuple[int, int, int]], period
                 d[2] = m
                 unit.append(d[: 3 + 3 * m])
                 d = None
-            f = bytearray(12)
+            f = bytearray(13)
             f[1] = 0x02
             v = dt + (i * 1000) // hz
             f[2:5] = bytes((v & 0xFF, (v >> 8) & 0xFF, (v >> 16) & 0xFF))
             f[5] = hz
             for jj, c in enumerate((sx, sy, sz)):
                 f[6 + 2 * jj], f[7 + 2 * jj] = c & 0xFF, (c >> 8) & 0xFF
+            f[12] = sid
             unit.append(f)
         prev = (sx, sy, sz)
     if d is not None:
@@ -366,25 +372,103 @@ def watch_json(root, budget: int) -> str:
     return "".join(out)
 
 
-def watch_sync(sync_ms: int, session: int) -> bytearray:
-    f = bytearray(12)
+def watch_sync(sync_ms: int, session: int, sid: int = 1) -> bytearray:
+    f = bytearray(13)
+    f[1] = 0x00
     s = sync_ms // 1000
     f[2:6] = s.to_bytes(4, "little")
     f[6:8] = (sync_ms - s * 1000).to_bytes(2, "little")
     f[8:12] = session.to_bytes(4, "little")
+    f[12] = sid
     return f
 
 
-def watch_blob(q: int, body: bytes, token: str) -> list[bytearray]:
-    """BleLink.sendBlob/nextBlobFrame; MAC = HMAC-SHA256(SHA-256(token), body)[:16]."""
+def watch_key(token: str) -> bytes:
+    """BleLink.keyOf: SHA-256(token)."""
+    import hashlib
+    return hashlib.sha256(token.encode()).digest()
+
+
+def watch_hmac(key: bytes, *parts: bytes, n: int) -> bytes:
+    """BleLink.hmac: HMAC-SHA256(key, a | b | c)[0..n)."""
     import hashlib
     import hmac
-    key = hashlib.sha256(token.encode()).digest()
-    mac = hmac.new(key, body, hashlib.sha256).digest()[:16]
-    out = [bytearray(b"\0\x08") + q.to_bytes(4, "little")]
+    return hmac.new(key, b"".join(parts), hashlib.sha256).digest()[:n]
+
+
+def watch_same(a: bytes, o: int, b: bytes | None, n: int) -> bool:
+    """BleLink.same."""
+    if b is None or len(a) < o + n or len(b) < n:
+        return False
+    d = 0
+    for i in range(n):
+        d |= a[o + i] ^ b[i]
+    return d == 0
+
+
+def watch_hello(token: str, nonce: bytes) -> tuple[bytearray, bytes]:
+    """BleLink.sendHello: [seq, 0x0B, SHA-256(key)[0..4), nonce[12]] and the proof it expects."""
+    import hashlib
+    key = watch_key(token)
+    f = bytearray(18)
+    f[1] = 0x0B
+    f[2:6] = hashlib.sha256(key).digest()[:4]
+    f[6:18] = nonce
+    return f, watch_hmac(key, b"pulso-hello", nonce, n=16)
+
+
+def watch_hello_answer(v: bytes, proof: bytes) -> str:
+    """BleLink.helloAnswer: READY, WAIT (bridge does not know the token) or rescan elsewhere."""
+    if watch_same(v, 3, proof, 16):
+        return "ready"
+    return "wait" if len(v) < 19 else "rescan"
+
+
+def i32(v: int) -> int:
+    v &= 0xFFFFFFFF
+    return v - (1 << 32) if v >= 1 << 31 else v
+
+
+def watch_ack_status(v: bytes, blob_q: int, attempt: int, key: bytes, nonce: bytes) -> int:
+    """BleLink.onCharacteristicChanged + ackStatus: the status; -1 ignored (another batch or
+    attempt), -2 ignored and the link re-proven (our attempt, MAC does not check)."""
+    if not (len(v) >= 17 and v[2] == 0xB1):
+        return -1
+    q = i32(v[3] | (v[4] << 8) | (v[5] << 16) | (v[6] << 24))
+    if q != i32(blob_q) or v[7] != attempt:
+        return -1
+    mac = watch_hmac(key, b"pulso-ack", nonce, bytes(v[3:9]), n=8)
+    return v[8] if watch_same(v, 9, mac, 8) else -2
+
+
+def watch_blob(q: int, body: bytes, token: str, attempt: int = 1) -> list[bytearray]:
+    """BleLink.sendBlob/nextBlobFrame; MAC = HMAC-SHA256(SHA-256(token), "pulso-blob" | q4 | body)[:16]
+    (q4 = put32(q), so a negative Number q signs the same 4 bytes as the frame carries)."""
+    q4 = (q & 0xFFFFFFFF).to_bytes(4, "little")
+    mac = watch_hmac(watch_key(token), b"pulso-blob", q4, body, n=16)
+    out = [bytearray(b"\0\x08") + q4 + bytes((attempt,))]
     for o in range(0, len(body), 18):
         out.append(bytearray(b"\0\x09") + body[o:o + 18])
     out.append(bytearray(b"\0\x0a") + len(body).to_bytes(2, "little") + mac)
+    return out
+
+
+def _decode(frames: list[bytearray]) -> list:
+    from pulso.bridge import frames as FR
+    dec = FR.Decoder()
+    for f in stamp(frames):
+        dec.feed(f)
+    return dec.take_events()
+
+
+def stamp(frames: list[bytearray], start: int = 0) -> list[bytes]:
+    """BleLink.write: seq at transmission time."""
+    out = []
+    for i, f in enumerate(frames):
+        f = bytearray(f)
+        f[0] = (start + i) & 0xFF
+        assert len(f) <= 20
+        out.append(bytes(f))
     return out
 
 
@@ -403,10 +487,18 @@ def test_ble_frames() -> None:
     from pulso import store
 
     src = (Path(__file__).resolve().parents[1] / "source" / "BleLink.mc").read_text()
-    consts = dict(re.findall(r"const (T_[A-Z_]+) = (0x[0-9A-Fa-f]+);", src))
+    consts = {k: int(v, 16) for k, v in re.findall(r"const ([A-Z_]+) = (0x[0-9A-Fa-f]+);", src)}
     want = {"T_SYNC": FR.SYNC, "T_ACC_KEY": FR.ACC_KEY, "T_ACC_DELTA": FR.ACC_DELTA, "T_BAT": FR.BAT,
-            "T_BLOB_START": FR.BLOB_START, "T_BLOB_DATA": FR.BLOB_DATA, "T_BLOB_END": FR.BLOB_END}
-    same_types = all(int(consts.get(k, "-1"), 16) == v for k, v in want.items())
+            "T_BLOB_START": FR.BLOB_START, "T_BLOB_DATA": FR.BLOB_DATA, "T_BLOB_END": FR.BLOB_END,
+            "T_HELLO": FR.HELLO, "BLOB_ACK": FR.BLOB_ACK, "HELLO_ACK": FR.HELLO_ACK}
+    same_types = all(consts.get(k) == v for k, v in want.items())
+    # the stream filter: every type the watch writes is accepted, none is a reserved (dropped) one
+    sent = {v for k, v in consts.items() if k.startswith("T_")}
+    filt = sent == {want[k] for k in want if k.startswith("T_")} and not sent & FR.RESERVED
+    labels = set(re.findall(r'Json\.utf8\("(pulso-[a-z]+)"\)', src)) == {"pulso-hello", "pulso-ack", "pulso-blob"}
+    # sendBlob signs label | q4 | json, q4 being put32(q): what watch_blob transliterates
+    blob_mac_src = bool(re.search(r'put32\(q4, 0, q\);\s*var mac = \(_key != null\) \? hmac\(_key as ByteArray, '
+                                  r'Json\.utf8\("pulso-blob"\), q4, json, 16\)', src))
     uuids = set(re.findall(r"6c1e000[123]-5b7a-4d6e-9f2a-50554c534f31", src))
     same_uuids = uuids == {P.SERVICE_UUID, P.DATA_UUID, P.CTRL_UUID}
 
@@ -417,29 +509,44 @@ def test_ble_frames() -> None:
     for i in range(50):   # two 1-s callbacks at 25 Hz, with one jump that forces a keyframe
         p = (p[0] + int(rng.integers(-60, 60)), p[1] + int(rng.integers(-60, 60)), p[2] + (300 if i == 37 else 0))
         xyz.append(p)
-    stream = [watch_sync(sync_ms, 1760630400)] + watch_unit(t0, sync_ms, xyz[:25], 1)[0] + watch_unit(t0 + 1000, sync_ms, xyz[25:], 1)[0]
+    stream = [watch_sync(sync_ms, 1760630400, sid=7)] + watch_unit(t0, sync_ms, xyz[:25], 1, sid=7)[0] \
+        + watch_unit(t0 + 1000, sync_ms, xyz[25:], 1, sid=7)[0]
     bat = bytearray(b"\0\x07") + bytes((64, 23))
     tok = "pulso_dev_" + "y" * 43
+    key = watch_key(tok)
     batch = {"v": 1, "d": "fr255-cap-a1b2c3", "q": 11, "src": "cap", "t": 1760630461,
              "rr": [[t0 + 900, [812, 820]]], "bat": [1760630460, float(watch_json_num(63.5)), None],
              "ev": [[1760630400, "mark", "reunião começou"]]}
     body = watch_json(batch, budget=3).encode()
     ok_job = json.loads(body) == batch and watch_json(batch, budget=1) == watch_json(batch, budget=10_000)
-    blob = watch_blob(11, body, tok)
-    # BleLink.pump alternates blob / stream frames and writes seq at send time
-    order, si, bi, turn = [], 0, 0, False
+
+    # handshake: watch HELLO -> real decoder -> bridge answer -> watch check
+    nonce = bytes(rng.integers(0, 256, 12).tolist())
+    hello, proof = watch_hello(tok, nonce)
+    dec = FR.Decoder()
+    dec.feed(stamp([hello])[0])
+    ev = dec.take_events()
+    bkey = FR.match_key([FR.blob_key("pulso_dev_other"), FR.blob_key(tok)], ev[0].key_id) if ev else None
+    answer = FR.hello_ack(0, 25, bkey, ev[0].nonce) if bkey else b""
+    stranger = FR.hello_ack(0, 25, None, nonce)
+    fake = FR.hello_ack(0, 25, FR.blob_key("pulso_dev_other"), nonce)
+    ok_hello = (bkey == key and len(hello) == 18 and len(answer) == 19
+                and watch_hello_answer(answer, proof) == "ready" and watch_hello_answer(stranger, proof) == "wait"
+                and watch_hello_answer(fake, proof) == "rescan")
+
+    # one abandoned attempt (F1), then BleLink.pump alternating blob / stream frames, seq at send time
+    abandoned = watch_blob(11, body, tok, attempt=1)[:6]
+    blob = watch_blob(11, body, tok, attempt=2)
+    order, si, bi, turn = list(abandoned), 0, 0, False
     allstream = stream + [bat]
     while si < len(allstream) or bi < len(blob):
         if bi < len(blob) and (turn or si >= len(allstream)):
             order.append(blob[bi]); bi += 1; turn = False
         else:
             order.append(allstream[si]); si += 1; turn = True
-    dec = FR.Decoder()
-    for i, f in enumerate(order):
-        f = bytearray(f); f[0] = i & 0xFF
-        assert len(f) <= 20
-        dec.feed(bytes(f))
-    done, failed = dec.take_blobs()
+    for f in stamp(order, start=1):
+        dec.feed(f)
+    events = dec.take_events()
     out = dec.take()
     samples = [s for _, _, ss in out.accel for s in ss]
     t_first = out.accel[0][0] if out.accel else None
@@ -449,25 +556,86 @@ def test_ble_frames() -> None:
         conn = store.connect(db)
         conn.execute("INSERT INTO device_tokens (token_sha256, label, created_ms) VALUES (?, ?, 0)", (auth._digest(tok), "fr255"))
         conn.commit()
-        st = P.handle_blob(P.local_sink(db), *done[0][:3], log=lambda m: None) if len(done) == 1 else -1
-    ok_blob = not failed and st == FR.BLOB_OK
+        blobs = [e for e in events if isinstance(e, FR.Blob)]
+        sink = P.local_sink(db)
+        st = P.handle_blob(sink, blobs[0].q, blobs[0].payload, blobs[0].mac, log=lambda m: None) if blobs else -1
+        n_rr = conn.execute("SELECT COUNT(*) FROM rr_intervals").fetchone()[0]
+        # SEC-1: someone else on DATA replays this genuine blob (sniffed) under the q/attempt of the
+        # next batch in flight (12, 4): the MAC covers q, so the bridge must not sign "rejected"
+        relabel = watch_blob(11, body, tok, attempt=4)
+        relabel[0][2:6] = (12).to_bytes(4, "little")
+        dec5 = FR.Decoder()
+        for f in stamp(relabel):
+            dec5.feed(f)
+        rb = [e for e in dec5.take_events() if isinstance(e, FR.Blob)]
+        st_relabel = P.handle_blob(sink, rb[0].q, rb[0].payload, rb[0].mac, log=lambda m: None) if rb else -1
+        # and content the watch signed for 12 that names 11 (never sent by BleTransport) is no
+        # verdict on 12 either
+        other = [e for e in _decode(watch_blob(12, body, tok)) if isinstance(e, FR.Blob)]
+        st_other = P.handle_blob(sink, other[0].q, other[0].payload, other[0].mac, log=lambda m: None) if other else -1
+        same_rr = conn.execute("SELECT COUNT(*) FROM rr_intervals").fetchone()[0] == n_rr
+    ok_blob = [type(e) for e in events] == [FR.Blob] and blobs[0].attempt == 2 and st == FR.BLOB_OK
+    ok_relabel = (blob_mac_src and st_relabel == FR.BLOB_BAD_MAC and st_other == FR.BLOB_RETRY and same_rr
+                  and watch_ack_status(FR.blob_ack(0, 25, 12, 4, st_relabel, key, nonce), 12, 4, key, nonce)
+                  == FR.BLOB_BAD_MAC)
+    # the bridge's signed ack, as the watch reads it: only for this nonce, batch, attempt and key
+    ack = FR.blob_ack(0, 25, 11, 2, st, bkey or b"", nonce)
+    ok_ack = (watch_ack_status(ack, 11, 2, key, nonce) == FR.BLOB_OK
+              and watch_ack_status(ack, 11, 1, key, nonce) == -1
+              and watch_ack_status(ack, 12, 2, key, nonce) == -1
+              and watch_ack_status(ack, 11, 2, key, bytes(12)) == -2
+              and watch_ack_status(FR.blob_ack(0, 25, 11, 2, 0, FR.blob_key("x"), nonce), 11, 2, key, nonce) == -2
+              and watch_ack_status(ack[:8] + bytes((1,)) + ack[9:], 11, 2, key, nonce) == -2
+              and watch_ack_status(FR.blob_ack(0, 25, 0x80000001, 2, 3, key, nonce), 0x80000001, 2, key, nonce) == 3
+              and len(ack) == 17)
+
+    # W3: the next SYNC is lost on the air; the chunk timed against it is dropped, never misdated
+    lost_sync = [watch_sync(t0, 1760630400, sid=8)]
+    later = watch_unit(t0 + 10000, t0, [(5, 5, 900)] * 25, 1, sid=8)[0]
+    for f in stamp(lost_sync + later, start=200)[1:]:          # seq gap where the SYNC was
+        dec.feed(f)
+    o3 = dec.take()
+    ok_sync = o3.accel == [] and o3.unsynced == 1 and o3.lost_frames >= 1
+    # ... nor after an app restart: the new run's sid counter starts over (its first SYNC may carry
+    # the id of the old run's last one); HELLO makes the decoder forget the old time base
+    dec.feed(stamp([watch_sync(t0 + 60000, 1760630999, sid=9)], start=220)[0])
+    hello2, _ = watch_hello(tok, bytes(12))
+    restart = [hello2] + watch_unit(t0 + 3 * 3600000, t0 + 3 * 3600000 - 10000, [(7, 7, 700)] * 25, 1, sid=9)[0]
+    for f in stamp(restart, start=0)[:1] + stamp(restart, start=1)[1:]:   # frame 1 (the new SYNC) lost
+        dec.feed(f)
+    o5 = dec.take()
+    ok_sync = ok_sync and o5.accel == [] and o5.unsynced == 1
+
+    # frames the watch never sends (RR, FEAT, HR, MARK) are refused on the open stream
+    inj = [bytearray(b"\0\x01") + bytes((0, 0, 0, 1)) + (800).to_bytes(2, "little"),
+           bytearray(b"\0\x04") + bytes((0, 0, 0, 1, 1, 0, 1, 0)),
+           bytearray(b"\0\x05") + bytes((0, 0, 0, 180)), bytearray(b"\0\x06") + bytes((0, 0, 0, 1))]
+    dec4 = FR.Decoder()
+    for f in stamp([watch_sync(sync_ms, 1, sid=1)] + inj):
+        dec4.feed(f)
+    o4 = dec4.take()
+    b4 = FR.to_batch(o4, "fr255-ble", 1, t0 // 1000)
+    ok_filter = filt and o4.ignored == 4 and not {"rr", "hr1", "ev", "acc"} & set(b4)
+
     # MAX mode at 100 Hz: averaged down to the bridge hint (25 Hz) before framing
     rng2 = np.random.default_rng(5)
     raw100 = [(int(v[0]), int(v[1]), int(v[2])) for v in rng2.integers(-900, 900, size=(100, 3))]
     u100, pts25 = watch_unit(t0, sync_ms, raw100, 1)
     dec2 = FR.Decoder()
-    for i, f in enumerate([watch_sync(sync_ms, 1)] + u100):
-        f = bytearray(f); f[0] = i & 0xFF
-        dec2.feed(bytes(f))
+    for f in stamp([watch_sync(sync_ms, 1)] + u100):
+        dec2.feed(f)
     o2 = dec2.take()
     got25 = [x for _, _, ss in o2.accel for x in ss]
     ok_avg = (len(pts25) == 25 and got25 == pts25 and all(hz == 25.0 for _, hz, _ in o2.accel)
               and pts25[0] == tuple(int(np.trunc(np.mean([p[c] for p in raw100[:4]]))) for c in range(3)))
     nums = [watch_json_num(v) for v in (64.0, 63.5, 0.1, -0.00001, 12.34567)]
     ok_num = nums == ["64", "63.5", "0.1", "-0", "12.3457"] and all(json.loads(x) is not None for x in nums)
-    check("ble_frames", same_types and same_uuids and ok_stream and ok_blob and ok_num and ok_job and ok_avg,
-          f"types={same_types} uuids={same_uuids} stream={ok_stream} ({len(samples)} samples, "
-          f"{len(order)} frames) avg100to25={ok_avg} ({len(u100)} frames) json_job={ok_job} blob={ok_blob} "
+    check("ble_frames", same_types and same_uuids and labels and ok_stream and ok_blob and ok_num and ok_job
+          and ok_avg and ok_hello and ok_ack and ok_sync and ok_filter and ok_relabel,
+          f"types={same_types} uuids={same_uuids} labels={labels} hello={ok_hello} stream={ok_stream} "
+          f"({len(samples)} samples, {len(order)} frames) blob_after_abandoned={ok_blob} ack_mac={ok_ack} "
+          f"relabel={ok_relabel} "
+          f"lost_sync={ok_sync} filter={ok_filter} avg100to25={ok_avg} ({len(u100)} frames) json_job={ok_job} "
           f"json_num={nums}")
 
 

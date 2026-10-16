@@ -32,6 +32,7 @@
     <string id="PressStart">START para iniciar</string>
     <string id="Queue">fila</string>
     <string id="NoCentral">configure a central</string>
+    <string id="Bridge">ponte</string>
     <string id="NoPhone">sem celular</string>
     <string id="Sending">enviando</string>
     <string id="AuthErr">token inválido</string>

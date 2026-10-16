@@ -9,6 +9,7 @@ One write tool (`marcar`) records a manual note ("café", "discussão com X") as
 
 from __future__ import annotations
 
+import json
 import math
 import sqlite3
 import threading
@@ -131,9 +132,12 @@ def build(conn: sqlite3.Connection, tz: str):
         end = _d(fim, today())
         start = _d(inicio, end - timedelta(days=29))
         key = f"{start.isoformat()}..{end.isoformat()}"
+        _, b = analysis.local_day_bounds(end, tz)
         with lock:
-            s = store.get_artefact(conn, "meetings:summary", key)
-            if s is None or recalcular:
+            # one stored before the period ended (a call earlier today) is missing the later meetings
+            row = conn.execute("SELECT created_ms, body FROM artefacts WHERE kind = 'meetings:summary' AND key = ?", (key,)).fetchone()
+            s = json.loads(row["body"]) if row and row["created_ms"] >= b and not recalcular else None
+            if s is None:
                 s = jobs.meeting_job(conn, start, end, tz)
         return _clean(s)
 

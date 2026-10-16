@@ -24,8 +24,10 @@ erro sobe (Bent et al. 2020, *npj Digit Med*). Por isso:
 - toda janela carrega `quality` (fração de batimentos não corrigidos) e `coverage`; qualidade < 85 % sai;
 - **só janelas paradas viram sinal de estresse**: ENMO médio da janela < 45 mG (corte sedentário de
   Bakrania et al. 2016) ou, sem acelerômetro, passos/min ≤ 5;
-- a cinta (`ble:strap`) tem prioridade sobre o pulso. Vale fazer uma autovalidação: 10 min deitado + uma
-  noite com cinta e relógio juntos mostram o viés do **seu** pulso.
+- RR de uma fonte só por minuto, nunca a mistura: os mesmos batimentos chegam em dobro (lote do app de
+  captura + campo do FIT da sessão; cinta + pulso na mesma noite) e intercalar duas séries derruba o RMSSD
+  em ~30 %. A cinta (`ble:strap`) tem prioridade sobre o pulso onde cobre o minuto. Vale fazer uma
+  autovalidação: 10 min deitado + uma noite com cinta e relógio juntos mostram o viés do **seu** pulso.
 
 ## 2. HRV
 
@@ -69,7 +71,8 @@ Verkuil et al. 2016 / Brown et al. 2020 (*Front Neurosci* 14:564123): por pessoa
 contra a aceleração; episódio quando o RMSSD fica > 2 EP abaixo do previsto por ≥ 7,5 min (exploratório,
 n = 6, mas o modelo publicado mais próximo do nosso caso). Aqui: ln RMSSD ~ log(1+ENMO) + harmônicos de 24 h,
 regressão pela mediana em janelas paradas do histórico; o resíduo padronizado é o canal `rr_hrv` da fusão.
-Código: `models/nonmetabolic_hrv.py`.
+Sem histórico parado suficiente (< 30 janelas), o canal fica de fora do dia — padronizar o dia contra ele
+mesmo poria um dia todo tenso em 0 z. Código: `models/nonmetabolic_hrv.py`.
 
 ## 4. Fusão: ativação latente
 
@@ -78,7 +81,8 @@ variância estacionária 1) observado por canais padronizados: FC adicional / es
 Garmin padronizado pelo seu histórico, −ln RMSSD padronizado. Cada canal tem ruído próprio **estimado dos
 dados** (passos EM sobre os resíduos suavizados); minutos sem um canal simplesmente não atualizam com ele.
 Suavizador RTS para o passado, filtro causal para “agora”. Saída: z ± σ e a parcela de cada canal na
-atualização. Código: `models/fusion.py`.
+atualização. Minutos a mais de 10 min da observação mais próxima (relógio no carregador, o resto do dia
+de hoje) ficam sem valor: ali o estado só decairia para 0 z e diluiria a média. Código: `models/fusion.py`.
 
 Validado em teste: recupera o estado com correlação > 0,9, ordena corretamente o ruído dos canais e
 erra menos que qualquer canal sozinho. Filtros de estado para ativação simpática existem na literatura
@@ -133,6 +137,10 @@ reunião difícil pode ser difícil porque o projeto já estava atrasado.
   relevante) e o CV de 7 dias; só depois de 14 noites.
 - Débito de sono: soma móvel de 14 dias de (necessidade − sono), necessidade padrão 7,5 h; noite sem
   dado não conta como noite sem sono.
+- As janelas são de dias corridos (noite que falta é lacuna, não encurta a janela) e cada noite usa o seu
+  próprio histórico: recalcular só os últimos dias dá os mesmos números que recalcular o mês. O
+  estagiamento vem de uma fonte por noite (FIT > Garmin Connect > outra), e a noite só é resumida fechada:
+  pelo registro de sono da Garmin ou depois de 90 min sem época nova (antes disso ainda pode crescer).
 
 ## 8. Treino
 

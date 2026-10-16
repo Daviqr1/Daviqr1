@@ -19,8 +19,20 @@ O Caddy emite o certificado (Let's Encrypt) para `PULSO_DOMAIN` e encaminha:
 | `/v1/ingest`, `/v1/face`, `/health` | API de ingestão (`pulso serve`) |
 | `/mcp` | MCP por HTTP (Bearer `PULSO_MCP_TOKEN`) |
 
-O serviço `jobs` (`pulso daemon`) reanalisa o dia a cada 5 min, sincroniza o Garmin Connect a cada 6 h,
-roda sono/reuniões às 04:30 e gera o relatório do dia anterior às 07:00 (segunda: semanal também).
+O serviço `jobs` (`pulso daemon`):
+
+| Quando | O quê |
+|---|---|
+| a cada 5 min | reanalisa o dia e avalia os alertas |
+| a cada 6 h | sincroniza o Garmin Connect, últimos 2 dias (com credenciais ou tokens salvos); das 05:00 às 12:00, também de hora em hora (só o dia de hoje) enquanto a noite passada não chegou |
+| uma vez por dia, a partir das 04:30 | sono/reuniões dos últimos 3 dias e de hoje; se a máquina estava desligada às 04:30, roda assim que ela volta |
+| a partir das 04:30, enquanto a noite passada falta: a cada 15 min e logo após cada sincronização | resume a noite passada assim que o estagiamento chega e a noite fecha (registro de sono da Garmin, ou 90 min sem época nova); o mostrador e o alerta de sono da manhã leem esse resumo |
+| uma vez por dia, 06:30 (até 12:00, se a máquina ligar depois) | relatório do dia anterior com o Claude, se houver `ANTHROPIC_API_KEY` (segunda: semanal também) |
+| uma vez por dia, a partir das 06:45 | os três resumos (arquivos locais; Google Docs com o login Google); o “Hoje” sozinho de novo a cada 2 h |
+
+Um job que falha fica registrado (artefato `job`, com o erro) e o laço continua, mesmo quando uma biblioteca
+tenta encerrar o processo; só Ctrl+C / `docker compose stop` param o serviço. Reiniciado no mesmo dia, ele não
+refaz o que já rodou bem (sono/reuniões, relatório, os três resumos).
 
 Coolify: aponte para `pulso/deploy/docker-compose.yml`; o domínio pode ficar no proxy do Coolify em vez
 do Caddy (remova o serviço `caddy` e exponha `api:8080` e `mcp:8765`).
@@ -84,6 +96,10 @@ pulso analyze --days 30
 pulso tag --days 30                              # etiqueta trechos das reuniões com o Claude
 pulso report --days 7 --kind weekly
 ```
+
+Agenda: reimporte o `.ics` exportado de novo para atualizar. Reuniões movidas, canceladas ou apagadas
+saem do banco, mas só nos dias que o arquivo cobre (um export de uma semana não apaga o resto da
+janela). Um convite avulso (`invite.ics`) mexe só no próprio evento.
 
 ## Claude
 

@@ -36,8 +36,10 @@ class UploadCall {
 //!
 //! Routing, per batch: the phone (HTTPS through Garmin Connect Mobile) is the default; the BLE
 //! bridge on the laptop takes the batch when the phone is not connected, when the batch is too
-//! big for the phone route, or when no central URL is configured. The live raw accelerometer
-//! never enters this queue: it streams straight to the bridge (BleLink).
+//! big for the phone route, when no central URL is configured, or for HTTP_FAIL_S after the phone
+//! route failed for a reason that is not the batch (tunnel down, stale URL, timeout, 404/5xx) —
+//! then the failed batch goes to the bridge right away instead of backing off. The live raw
+//! accelerometer never enters this queue: it streams straight to the bridge (BleLink).
 //! A batch is only ever dropped for errors that are about the batch itself; link, server
 //! availability and configuration errors (no phone, timeouts, 404, 502-504, tunnel down) keep
 //! it queued however long they last.
@@ -45,6 +47,7 @@ class Uploader {
     const STUCK_MS = 180000;      // the system always calls back; this only guards a lost callback
     const GIVE_UP_TRIES = 8;      // per batch, for batch-specific errors (500/501, -402/-403)
     const PHONE_MAX_BYTES = 6000; // larger POST bodies risk -402/-403 through the phone
+    const HTTP_FAIL_S = 600;      // after a phone-route failure, prefer the bridge this long
 
     private var _queue as UploadQueue;
     private var _http as HttpTransport;
@@ -58,6 +61,7 @@ class Uploader {
     private var _streak as Number = 0;
     private var _failQ as Number = -1;
     private var _failCount as Number = 0;
+    private var _httpFailS as Number = 0;             // last phone-route failure (0 = none)
 
     var status as Number = 0;
     var lastCode as Number = 0;
@@ -77,7 +81,8 @@ class Uploader {
     function route(size as Number) as Transport or Null {
         var bleOk = _ble.isAvailable();
         var httpOk = _http.isAvailable();
-        if (bleOk && (size > PHONE_MAX_BYTES || !httpOk || !System.getDeviceSettings().phoneConnected)) {
+        var httpFailing = _httpFailS != 0 && Time.now().value() - _httpFailS < HTTP_FAIL_S;
+        if (bleOk && (size > PHONE_MAX_BYTES || !httpOk || httpFailing || !System.getDeviceSettings().phoneConnected)) {
             return _ble;
         }
         if (httpOk) {
@@ -112,6 +117,9 @@ class Uploader {
         _ble.tick();
         if (_inFlight != null && System.getTimer() - _sentTimer > STUCK_MS) {
             _inFlight = null;
+            if (_transport == _http) {
+                _httpFailS = nowS;
+            }
             lastCode = Communications.NETWORK_REQUEST_TIMED_OUT;
             status = Link.ERR;
             backoff(nowS, lastCode);
@@ -175,7 +183,11 @@ class Uploader {
         }
         lastCode = code;
         var nowS = Time.now().value();
+        var viaHttp = current && _transport == _http;
         if (ok) {
+            if (viaHttp) {
+                _httpFailS = 0;
+            }
             if (data != null && data.get("dup") == 1) {
                 dups++;
             }
@@ -222,6 +234,14 @@ class Uploader {
             }
         }
         status = linkDown ? Link.NOPHONE : (auth ? Link.AUTH : Link.ERR);
+        if (viaHttp) {
+            _httpFailS = nowS;
+            if (_ble.isAvailable()) {
+                _wanted = true;   // the bridge is up: the same batch goes there now (route)
+                pump();
+                return;
+            }
+        }
         backoff(nowS, code);
     }
 

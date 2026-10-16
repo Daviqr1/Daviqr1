@@ -32,6 +32,8 @@ FIT_DAYS = 14
 STILL_ENMO_MG = 45.0
 STILL_STEPS_PM = 5.0
 ENMO_WIN = "enmo_win"
+# fused arousal is kept only within this many minutes of an observation from some channel
+OBSERVED_REACH_MIN = 10
 
 
 def local_day_bounds(day: date, tz: str) -> tuple[int, int]:
@@ -39,6 +41,14 @@ def local_day_bounds(day: date, tz: str) -> tuple[int, int]:
     a = datetime.combine(day, time(0, 0), tzinfo=z).astimezone(timezone.utc)
     b = datetime.combine(day + timedelta(days=1), time(0, 0), tzinfo=z).astimezone(timezone.utc)
     return int(a.timestamp() * 1000), int(b.timestamp() * 1000)
+
+
+def _rank(src: str, preference: tuple[str, ...]) -> int:
+    """Position of `src` in a preference list (matched by prefix, so 'fit:monitor' matches 'fit')."""
+    for i, p in enumerate(preference):
+        if src.startswith(p):
+            return i
+    return len(preference)
 
 
 def best_minute_series(conn: sqlite3.Connection, metric: str, start_ms: int, end_ms: int,
@@ -53,18 +63,43 @@ def best_minute_series(conn: sqlite3.Connection, metric: str, start_ms: int, end
     ).fetchall()
     sources = [r[0] for r in rows]
 
-    def rank(src: str) -> int:
-        for i, p in enumerate(preference):
-            if src.startswith(p):
-                return i
-        return len(preference)
-
-    for src in sorted(sources, key=rank):
+    for src in sorted(sources, key=lambda s: _rank(s, preference)):
         ts, v = store.series(conn, metric, start_ms, end_ms, source=src)
         b = bin_mean(ts, v, bins)
         fill = np.isnan(out) & np.isfinite(b)
         out[fill] = b[fill]
     return out
+
+
+RR_PICK_COVERAGE = 0.5  # share of a minute a source's beats must span to win it by preference
+
+
+def best_rr(conn: sqlite3.Connection, start_ms: int, end_ms: int,
+            preference: tuple[str, ...] = M.HR_PREFERENCE) -> tuple[np.ndarray, np.ndarray]:
+    """RR intervals in [start_ms, end_ms) from ONE source per minute: the most preferred source whose
+    beats span at least half of that minute, else the one that spans most of it. Never the union:
+    the same beats often arrive twice (capture upload + the session FIT's developer field; strap and
+    wrist on the same night), and interleaving two streams turns successive differences into
+    device-to-device noise (RMSSD falls by ~1/sqrt(2))."""
+    sources = [r[0] for r in conn.execute(
+        "SELECT DISTINCT source FROM rr_intervals WHERE ts_ms >= ? AND ts_ms < ?", (start_ms, end_ms))]
+    if len(sources) <= 1:
+        return store.rr(conn, start_ms, end_ms)
+    sources.sort(key=lambda s: (_rank(s, preference), s))
+    n = int((end_ms - start_ms + MIN - 1) // MIN)
+    per, cov = [], np.zeros((len(sources), n))
+    for k, src in enumerate(sources):
+        ts, rr = store.rr(conn, start_ms, end_ms, source=src)
+        idx = ((ts - start_ms) // MIN).astype(np.int64)
+        per.append((ts, rr, idx))
+        cov[k] = np.bincount(idx, weights=rr, minlength=n)[:n] / MIN
+    ok = cov >= RR_PICK_COVERAGE
+    pick = np.where(ok.any(axis=0), ok.argmax(axis=0), cov.argmax(axis=0))
+    keep = [(ts[pick[idx] == k], rr[pick[idx] == k]) for k, (ts, rr, idx) in enumerate(per)]
+    ts = np.concatenate([t for t, _ in keep])
+    rr = np.concatenate([r for _, r in keep])
+    order = np.argsort(ts, kind="stable")
+    return ts[order], rr[order]
 
 
 def steps_from_cumulative(conn: sqlite3.Connection, start_ms: int, end_ms: int) -> np.ndarray:
@@ -107,13 +142,13 @@ def sleep_mask(conn: sqlite3.Connection, bins: np.ndarray) -> np.ndarray:
 
 def hrv_minutes(conn: sqlite3.Connection, start_ms: int, end_ms: int, window_s: float = 120.0,
                 full: bool = True) -> dict[str, np.ndarray]:
-    """Clean all RR in range and compute 2-min windows stepped every minute, keyed to the
-    minute grid by window end. Also returns the mean ENMO of each window (NaN when no
-    accelerometer data covers it) so callers can keep only still windows."""
+    """Clean the RR in range (one source per minute, see best_rr) and compute 2-min windows
+    stepped every minute, keyed to the minute grid by window end. Also returns the mean ENMO of
+    each window (NaN when no accelerometer data covers it) so callers can keep only still windows."""
     bins = grid(start_ms, end_ms)
     keys = (M.RMSSD, M.LN_RMSSD, M.SDNN, M.DFA_A1, M.RESP_RSA, M.HR_RR, M.RR_QUALITY, ENMO_WIN)
     out = {k: np.full(bins.size, np.nan) for k in keys}
-    ts, rr = store.rr(conn, start_ms - int(window_s * 1000), end_ms)
+    ts, rr = best_rr(conn, start_ms - int(window_s * 1000), end_ms)
     if rr.size < 50:
         return out
     e_ts, e_v = store.series(conn, M.ENMO, start_ms - int(window_s * 1000), end_ms)
@@ -196,6 +231,13 @@ def _f(x: float) -> float | None:
     return None if x is None or (isinstance(x, float) and math.isnan(x)) else float(x)
 
 
+def _within(mask: np.ndarray, reach: int) -> np.ndarray:
+    """True where some True of `mask` lies within `reach` steps (either side)."""
+    c = np.concatenate([[0], np.cumsum(mask, dtype=np.int64)])
+    i = np.arange(mask.size)
+    return c[np.minimum(mask.size, i + reach + 1)] - c[np.maximum(0, i - reach)] > 0
+
+
 def _robust_z(x: np.ndarray, ref: np.ndarray) -> np.ndarray:
     ref = ref[np.isfinite(ref)]
     if ref.size < 30:
@@ -249,7 +291,7 @@ def analyze_day(conn: sqlite3.Connection, day: date, tz: str, write: bool = True
     stress_now = best_minute_series(conn, M.STRESS_NOW, fit_start, end, preference=(M.SRC_CIQ_CAPTURE, M.SRC_CIQ_FACE))
     stress_all = np.where(np.isnan(stress_all), stress_now, stress_all)
     ref = stress_all[: day_sl.start][~asleep_all[: day_sl.start]]
-    stress_z = _robust_z(stress_all[day_sl], ref if ref.size else stress_all[day_sl])
+    stress_z = _robust_z(stress_all[day_sl], ref)  # < 30 historical values: no channel, never the day itself
     stress_z = np.where(asleep_all[day_sl], np.nan, stress_z)
 
     # --- our own HRV channel -------------------------------------------------------------
@@ -274,8 +316,11 @@ def analyze_day(conn: sqlite3.Connection, day: date, tz: str, write: bool = True
             notes.append(f"non-metabolic HRV model fitted on {model_nm.n_fit} still historical windows")
         else:
             ref = np.where(st_hist, hist[M.LN_RMSSD], np.nan)
-            ref = ref if np.sum(np.isfinite(ref)) >= 30 else np.where(st_day, hv[M.LN_RMSSD], np.nan)
-            hrv_z = -_robust_z(hv[M.LN_RMSSD], ref)
+            if np.sum(np.isfinite(ref)) >= 30:
+                hrv_z = -_robust_z(hv[M.LN_RMSSD], ref)
+            else:
+                # standardising the day against itself would centre a uniformly stressful day at 0 z
+                notes.append("HRV channel left out: fewer than 30 still historical windows")
         n_moving = int(np.sum(np.isfinite(hv[M.LN_RMSSD]) & ~st_day))
         if n_moving:
             notes.append(f"{n_moving} RR windows dropped from the stress signal (moving)")
@@ -287,7 +332,16 @@ def analyze_day(conn: sqlite3.Connection, day: date, tz: str, write: bool = True
     if channels:
         fr = fusion.fuse(ts, channels)
         arousal, arousal_sd, rmap = fr.mean, fr.sd, fr.r
-        arousal = np.where(asleep_all[day_sl], np.nan, arousal)
+        # the smoother gives every minute a value, decaying to the prior 0 z where nothing observes
+        # it: keep only minutes near a real observation and not after now, so off-wrist gaps and the
+        # rest of today are neither persisted nor averaged as calm
+        seen = np.zeros(ts.size, dtype=bool)
+        for c in channels:
+            seen |= np.isfinite(c.z)
+        seen = _within(seen, OBSERVED_REACH_MIN)
+        seen &= ts <= store.now_ms()
+        arousal = np.where(asleep_all[day_sl] | ~seen, np.nan, arousal)
+        arousal_sd = np.where(seen, arousal_sd, np.nan)
     else:
         arousal = np.full(ts.size, np.nan)
         arousal_sd = np.full(ts.size, np.nan)

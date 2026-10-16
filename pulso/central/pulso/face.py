@@ -109,17 +109,20 @@ def face_state(conn: sqlite3.Connection, now_ms: int, tz: str) -> dict:
             nm["r"] = risk
         out["nm"] = nm
 
-    # newest alert of the last 30 min: the watch shows it once as a native notification (by id)
-    row = conn.execute("SELECT key, body FROM artefacts WHERE kind = 'alert' AND created_ms >= ? ORDER BY created_ms DESC LIMIT 1",
-                       (now_ms - 30 * MIN,)).fetchone()
-    if row:
+    # alerts of the last 30 min: the watch notifies once per `i` and remembers only the last one, so
+    # `i` is the newest alert's id (every new alert changes it; an older one leaving the window does
+    # not, so nothing is notified twice) and "(+N)" says N other alerts are in the window, e.g. two
+    # fired by the same evaluation, whose texts are in the summary / MCP
+    rows = conn.execute("SELECT key, body FROM artefacts WHERE kind = 'alert' AND created_ms >= ? ORDER BY created_ms DESC, key DESC",
+                        (now_ms - 30 * MIN,)).fetchall()
+    if rows:
         import json as _json
-
-        al = _json.loads(row["body"])
         import zlib
 
-        # stable short id (Python hash() is salted per process)
-        out["al"] = {"i": zlib.crc32(al["id"].encode()) & 0x7FFFFFFF, "m": _short(al["text"], 60)}  # fits a Monkey C Number
+        al = _json.loads(rows[0]["body"])
+        more = f" (+{len(rows) - 1})" if len(rows) > 1 else ""
+        # stable short id (Python hash() is salted per process) that fits a Monkey C Number
+        out["al"] = {"i": zlib.crc32(al["id"].encode()) & 0x7FFFFFFF, "m": _short(al["text"], 60 - len(more)) + more}
 
     insight = store.get_artefact(conn, "insight:face", today)
     if insight and insight.get("text"):

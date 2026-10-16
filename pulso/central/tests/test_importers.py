@@ -124,6 +124,155 @@ def test_ics_recurring(tmp_path: Path):
     assert evs[0].end_ms - evs[0].start_ms == 15 * 60_000
 
 
+WEEKLY = """BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Google Inc//Google Calendar 70.9054//EN
+X-WR-CALNAME:Trabalho
+BEGIN:VEVENT
+DTSTART;TZID=America/Sao_Paulo:20261005T100000
+DTEND;TZID=America/Sao_Paulo:20261005T110000
+RRULE:FREQ=WEEKLY;BYDAY=MO
+UID:weekly123@google.com
+SUMMARY:Sync semanal
+END:VEVENT
+BEGIN:VEVENT
+DTSTART;TZID=America/Sao_Paulo:20261012T150000
+DTEND;TZID=America/Sao_Paulo:20261012T160000
+RECURRENCE-ID;TZID=America/Sao_Paulo:20261012T100000
+UID:weekly123@google.com
+SUMMARY:Sync semanal
+END:VEVENT
+BEGIN:VEVENT
+DTSTART;TZID=America/Sao_Paulo:20261019T100000
+DTEND;TZID=America/Sao_Paulo:20261019T110000
+RECURRENCE-ID;TZID=America/Sao_Paulo:20261019T100000
+STATUS:CANCELLED
+UID:weekly123@google.com
+SUMMARY:Sync semanal
+END:VEVENT
+BEGIN:VEVENT
+DTSTART;TZID=America/Sao_Paulo:20261014T140000
+DTEND;TZID=America/Sao_Paulo:20261014T143000
+UID:once@google.com
+SUMMARY:Entrevista
+END:VEVENT
+END:VCALENDAR
+"""
+
+
+def test_ics_moved_cancelled_and_deleted_instances(tmp_path: Path):
+    """F10: a RECURRENCE-ID override replaces its slot (moved or cancelled), and re-importing the
+    calendar drops what it no longer has, without touching another calendar's events."""
+    pytest.importorskip("icalendar")
+    from pulso.importers import calendar_ics
+
+    tz = ZoneInfo("America/Sao_Paulo")
+
+    def slots():
+        return sorted(datetime.fromtimestamp(e.start_ms / 1000, tz=tz).strftime("%m-%d %H:%M")
+                      for e in store.events(conn, 0, 2**62, kinds=["calendar"]))
+
+    conn = store.connect(":memory:")
+    other = tmp_path / "pessoal.ics"
+    other.write_text(ICS)
+    calendar_ics.import_ics(conn, other, "America/Sao_Paulo", date(2026, 10, 1), date(2026, 10, 31))
+    personal = slots()
+    f = tmp_path / "trabalho.ics"
+    f.write_text(WEEKLY)
+    calendar_ics.import_ics(conn, f, "America/Sao_Paulo", date(2026, 10, 1), date(2026, 10, 31))
+    work = sorted(set(slots()) - set(personal))
+    assert work == ["10-05 10:00", "10-12 15:00", "10-14 14:00", "10-26 10:00"]
+    once = [e for e in store.events(conn, 0, 2**62, kinds=["calendar"]) if e.title == "Entrevista"][0]
+    store.put_artefact(conn, "meeting_response", once.id, {"title": "Entrevista", "during": 1.0})
+    # the interview is deleted from the calendar and the export downloaded again
+    f.write_text(WEEKLY.replace(WEEKLY[WEEKLY.index("BEGIN:VEVENT\nDTSTART;TZID=America/Sao_Paulo:20261014"):
+                                      WEEKLY.index("END:VCALENDAR")], ""))
+    calendar_ics.import_ics(conn, f, "America/Sao_Paulo", date(2026, 10, 1), date(2026, 10, 31))
+    assert sorted(set(slots()) - set(personal)) == ["10-05 10:00", "10-12 15:00", "10-26 10:00"]
+    assert set(personal) <= set(slots())  # the other calendar is untouched
+    assert store.get_artefact(conn, "meeting_response", once.id) is None
+
+
+INVITE = """BEGIN:VCALENDAR
+PRODID:-//Google Inc//Google Calendar 70.9054//EN
+VERSION:2.0
+METHOD:{method}
+BEGIN:VEVENT
+DTSTART:{s}
+DTEND:{e}
+UID:{uid}
+SUMMARY:{t}
+STATUS:{status}
+END:VEVENT
+END:VCALENDAR
+"""
+
+
+def _invite(folder: Path, s: str, uid: str, title: str, method="REQUEST", status="CONFIRMED") -> Path:
+    folder.mkdir(exist_ok=True)
+    f = folder / "invite.ics"  # Google names every invitation attachment invite.ics
+    e = s[:9] + f"{int(s[9:11]) + 1:02d}" + s[11:]
+    f.write_text(INVITE.format(method=method, s=s, e=e, uid=uid, t=title, status=status))
+    return f
+
+
+def test_ics_invitations_speak_only_for_their_own_events(tmp_path: Path):
+    """verify N1(a): invitations (METHOD:REQUEST, no calendar name) do not erase each other; an
+    updated invitation moves its event and a cancellation removes it."""
+    pytest.importorskip("icalendar")
+    from pulso.importers import calendar_ics
+
+    conn = store.connect(":memory:")
+    window = ("America/Sao_Paulo", date(2026, 9, 1), date(2026, 11, 1))
+
+    def titles():
+        return [(e.title, datetime.fromtimestamp(e.start_ms / 1000, tz=timezone.utc).strftime("%d %H"))
+                for e in store.events(conn, 0, 2**62, kinds=["calendar"])]
+
+    calendar_ics.import_ics(conn, _invite(tmp_path / "a", "20261012T130000Z", "one@google.com", "Entrevista"), *window)
+    calendar_ics.import_ics(conn, _invite(tmp_path / "b", "20261013T130000Z", "two@google.com", "Review"), *window)
+    assert titles() == [("Entrevista", "12 13"), ("Review", "13 13")]
+    # the interview is rescheduled: the new invitation replaces the old slot
+    calendar_ics.import_ics(conn, _invite(tmp_path / "c", "20261015T170000Z", "one@google.com", "Entrevista"), *window)
+    assert titles() == [("Review", "13 13"), ("Entrevista", "15 17")]
+    # and then cancelled
+    calendar_ics.import_ics(conn, _invite(tmp_path / "d", "20261015T170000Z", "one@google.com", "Entrevista",
+                                          method="CANCEL", status="CANCELLED"), *window)
+    assert titles() == [("Review", "13 13")]
+
+
+def _export(days, weekly: bool = False) -> str:
+    body = "".join("BEGIN:VEVENT\nDTSTART:202610%02dT130000Z\nDTEND:202610%02dT140000Z\nUID:u%d@x\nSUMMARY:M%d\n"
+                   "END:VEVENT\n" % (k, k, k, k) for k in days)
+    if weekly:  # a series exported whole (its RRULE) even when the export covers a few days
+        body += ("BEGIN:VEVENT\nDTSTART:20260907T110000Z\nDTEND:20260907T113000Z\nRRULE:FREQ=WEEKLY;BYDAY=MO\n"
+                 "UID:weekly@x\nSUMMARY:1:1\nEND:VEVENT\n")
+    return "BEGIN:VCALENDAR\nVERSION:2.0\nMETHOD:PUBLISH\nX-WR-CALNAME:Calendar\n" + body + "END:VCALENDAR\n"
+
+
+@pytest.mark.parametrize("weekly", [False, True])
+def test_ics_date_range_export_keeps_the_rest_of_the_window(tmp_path: Path, weekly: bool):
+    """verify N1(b): an export of the same calendar for 7 days (Outlook 'Save Calendar' with a date
+    range) removes only what is gone from those days, not every other event in the 90-day window."""
+    pytest.importorskip("icalendar")
+    from pulso.importers import calendar_ics
+
+    conn = store.connect(":memory:")
+    window = ("America/Sao_Paulo", date(2026, 9, 1), date(2026, 11, 1))
+    f = tmp_path / "agenda.ics"
+    f.write_text(_export(range(1, 31), weekly))
+    calendar_ics.import_ics(conn, f, *window)
+    full = {e.title for e in store.events(conn, 0, 2**62, kinds=["calendar"])}
+    first = [e for e in store.events(conn, 0, 2**62, kinds=["calendar"]) if e.title == "M3"][0]
+    store.put_artefact(conn, "meeting_response", first.id, {"title": "M3", "during": 1.0})
+    f.write_text(_export([k for k in range(16, 23) if k != 20], weekly))  # M20 was deleted meanwhile
+    calendar_ics.import_ics(conn, f, *window)
+    left = [e.title for e in store.events(conn, 0, 2**62, kinds=["calendar"])]
+    assert set(left) == full - {"M20"}
+    assert len(left) == 29 + (8 if weekly else 0)  # 8 Mondays from 09-07 to 10-26
+    assert store.get_artefact(conn, "meeting_response", first.id)
+
+
 def test_git_import(tmp_path: Path):
     from pulso.importers import gitlog
 

@@ -11,14 +11,16 @@ drops it from the notebook):
               stays small for years)
 
 Only computed numbers leave the machine — no raw series, no transcript text — and colleagues'
-names are replaced by stable pseudonyms unless `names=True`.
+names are replaced by stable pseudonyms unless `names=True` (`ai.names`: the same Pessoa A, B...
+the report uses with Claude). Besides the fields known to carry names (titles, speaker labels,
+alert texts, the report), every finished document gets a last pass, so a new free-text field
+cannot bypass it; the 'Atualizado em' line is ours and skips it ("America/Sao_Paulo" is a time zone,
+not a colleague named Paulo).
 """
 
 from __future__ import annotations
 
 import json
-import os
-import re
 import sqlite3
 from collections import defaultdict
 from dataclasses import dataclass
@@ -29,7 +31,8 @@ from zoneinfo import ZoneInfo
 import numpy as np
 
 from pulso import alerts, config, jobs, store
-from pulso.ai.facts import fmt, hhmm
+from pulso.ai.facts import fmt, hhmm, pct
+from pulso.ai.names import Pseudonyms
 
 WEEKDAYS = ["seg", "ter", "qua", "qui", "sex", "sáb", "dom"]
 
@@ -69,43 +72,15 @@ def _stamp(tz: str) -> str:
     return f"Atualizado em: {datetime.now(ZoneInfo(tz)).strftime('%Y-%m-%d %H:%M')} ({tz})"
 
 
-class _Anonymizer:
-    """Stable pseudonyms (Pessoa A, B, ...) for every speaker/attendee name the store knows, applied
-    to speaker labels and meeting titles. Your own aliases (PULSO_ME) stay as they are."""
-
-    def __init__(self, conn: sqlite3.Connection):
-        me = {a.strip().lower() for a in os.environ.get("PULSO_ME", "eu,me").split(",") if a.strip()}
-        people: set[str] = set()
-        for r in conn.execute("SELECT attrs FROM events WHERE kind IN ('meeting', 'calendar')"):
-            a = json.loads(r["attrs"])
-            for k in ("speakers", "attendees"):
-                for n in a.get(k) or []:
-                    if isinstance(n, str) and n.strip() and n.strip().lower() not in me and "@" not in n:
-                        people.add(n.strip())
-        for r in conn.execute("SELECT DISTINCT speaker FROM transcript_segments WHERE speaker IS NOT NULL"):
-            if r["speaker"].strip().lower() not in me:
-                people.add(r["speaker"].strip())
-        self.map: dict[str, str] = {}
-        for i, n in enumerate(sorted(people, key=lambda x: (-len(x), x))):
-            self.map[n] = f"Pessoa {chr(ord('A') + i % 26)}{'' if i < 26 else i // 26}"
-        pats = []
-        for full, alias in self.map.items():  # longest first: "Ana Souza" before "Ana"
-            pats.append((re.compile(rf"\b{re.escape(full)}\b", re.IGNORECASE), alias))
-            first = full.split()[0]
-            if len(first) > 2 and first.lower() not in me:
-                pats.append((re.compile(rf"\b{re.escape(first)}\b", re.IGNORECASE), alias))
-        self.pats = pats
-
-    def __call__(self, text: str) -> str:
-        if text in self.map:
-            return self.map[text]
-        for p, alias in self.pats:
-            text = p.sub(alias, text)
-        return text
-
-
 def _ident(x: str) -> str:
     return x
+
+
+def _final(T, md: str) -> str:
+    """The last pseudonym pass over a finished document, line by line, sparing the stamp line."""
+    if T is _ident:
+        return md
+    return "\n".join(line if line.startswith("Atualizado em:") else T(line) for line in md.split("\n"))
 
 
 def _titles(conn: sqlite3.Connection) -> dict[str, str]:
@@ -125,10 +100,11 @@ def _episode_lines(conn, d: date, tz: str, T, titles) -> list[str]:
 def _night_line(n: dict | None) -> str:
     if not n:
         return "sem noite registrada"
-    return (f"{fmt(n['total_sleep_min'] / 60, 1)} h de sono, eficiência {fmt((n.get('efficiency') or 0) * 100, 0)} %, "
-            f"{n.get('awakenings', 0)} despertares, FC mínima {fmt(n.get('hr_nadir'), 0)} bpm aos "
-            f"{fmt((n.get('hr_nadir_at_frac') or 0) * 100, 0)} % da noite, HRV {fmt(n.get('hrv_ms'), 0)} ms "
-            f"({n.get('hrv_status') or '—'}), débito de 14 dias {fmt(n.get('debt_min'), 0)} min")
+    eff, nadir_at = pct(n.get("efficiency")), pct(n.get("hr_nadir_at_frac"))  # missing stays missing, never 0 %
+    return (f"{fmt(n['total_sleep_min'] / 60, 1)} h de sono, " + (f"eficiência {fmt(eff, 0)} %, " if eff is not None else "")
+            + f"{fmt(n.get('awakenings'), 0)} despertares, FC mínima {fmt(n.get('hr_nadir'), 0)} bpm"
+            + (f" aos {fmt(nadir_at, 0)} % da noite" if nadir_at is not None else "")
+            + f", HRV {fmt(n.get('hrv_ms'), 0)} ms ({n.get('hrv_status') or '—'}), débito de 14 dias {fmt(n.get('debt_min'), 0)} min")
 
 
 def alert_level(conn: sqlite3.Connection, now_ms: int) -> tuple[str, str]:
@@ -185,7 +161,7 @@ def build_today(conn: sqlite3.Connection, tz: str, today: date, T=_ident) -> str
     out += ["## Próximos compromissos de hoje", ""]
     out += [f"- {hhmm(e.start_ms, tz)}–{hhmm(e.end_ms, tz)} {T(e.title or 'compromisso')}" for e in nxt[:8]] or ["- nenhum"]
     out += ["", "## Alertas (48 h)", ""]
-    out += [f"- {_t(x['at_ms'], tz)} — {x['text']} ({T(x['detail'])})" for x in alerts.recent(conn, now_ms - 48 * 3600_000)] or ["- nenhum"]
+    out += [f"- {_t(x['at_ms'], tz)} — {T(x['text'])} ({T(x['detail'])})" for x in alerts.recent(conn, now_ms - 48 * 3600_000)] or ["- nenhum"]
     out += ["", "## Últimos 7 dias", "", *_table(rows), ""]
 
     rep = _last_report(conn)
@@ -287,11 +263,11 @@ def build_aggregates(conn: sqlite3.Connection, tz: str, today: date, T=_ident) -
 
 def documents(conn: sqlite3.Connection, tz: str, today: date | None = None, names: bool = False, days: int = 60) -> list[Doc]:
     today = today or datetime.now(ZoneInfo(tz)).date()
-    T = _ident if names else _Anonymizer(conn)
+    T = _ident if names else Pseudonyms(conn)
     return [
-        Doc("hoje", TITLES["hoje"], build_today(conn, tz, today, T)),
-        Doc("dias", TITLES["dias"], build_days(conn, tz, today, days, T)),
-        Doc("semanas", TITLES["semanas"], build_aggregates(conn, tz, today, T)),
+        Doc("hoje", TITLES["hoje"], _final(T, build_today(conn, tz, today, T))),
+        Doc("dias", TITLES["dias"], _final(T, build_days(conn, tz, today, days, T))),
+        Doc("semanas", TITLES["semanas"], _final(T, build_aggregates(conn, tz, today, T))),
     ]
 
 

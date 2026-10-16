@@ -3,6 +3,8 @@
 Rules (each with a cooldown so the watch does not nag):
 
     agora      arousal of the last 10 min > 2 z while still (not exercise)       cooldown 60 min
+               still = movement data exists and shows none (steps, else the watch's daily step
+               counter, plus ENMO when the capture app runs) and no workout/TREINO/MAX session
     reunião    a meeting starts in <= 15 min and similar meetings weighed >= 2   once per meeting
     sequência  3+ meetings ahead today with < 10 min between them               once per day
     sono       last night: sleep debt > 5 h or HRV below your normal range        once per morning
@@ -20,8 +22,8 @@ from zoneinfo import ZoneInfo
 
 import numpy as np
 
+from pulso import analysis, store
 from pulso import metrics as M
-from pulso import store
 from pulso.face import predicted_meeting_load
 
 MIN = 60_000
@@ -50,6 +52,38 @@ def _recent(conn: sqlite3.Connection, kind: str, since_ms: int) -> bool:
     return any(json.loads(r["body"]).get("kind") == kind for r in rows)
 
 
+STILL_STEPS_PM = 20.0  # mean steps/min over the 10 min
+
+
+def _still(conn: sqlite3.Connection, a: int, b: int) -> bool:
+    """Still over [a, b), judged from what live ingest actually sends: per-minute steps where some
+    source has them (FIT / Garmin Connect, usually hours later), else the face's cumulative daily
+    counter, and the capture app's per-second ENMO when it runs. No movement data is not 'still'."""
+    steps = analysis.best_minute_series(conn, M.STEPS_PM, a, b, preference=(M.SRC_FIT, M.SRC_GC, M.SRC_CIQ_FACE))
+    steps = np.where(np.isnan(steps), analysis.steps_from_cumulative(conn, a, b), steps)
+    steps = steps[np.isfinite(steps)]
+    _, enmo = store.series(conn, M.ENMO, a, b)
+    if steps.size == 0 and enmo.size == 0:
+        return False
+    if steps.size and float(np.mean(steps)) >= STILL_STEPS_PM:
+        return False
+    return not (enmo.size and float(np.mean(enmo)) >= analysis.STILL_ENMO_MG)
+
+
+def _exercising(conn: sqlite3.Connection, now_ms: int) -> bool:
+    """A workout overlaps now, or the capture app's latest session was opened in TREINO/MAX and not
+    stopped (its 'cap' marks: 'start:<mode>' / 'stop:<reason>')."""
+    if store.events(conn, now_ms - 10 * MIN, now_ms + 1, kinds=["workout"]):
+        return True
+    caps = [e for e in store.events(conn, now_ms - 6 * 3600_000, now_ms + 1, kinds=["note"])
+            if e.attrs.get("kind") == "cap" and e.start_ms <= now_ms]
+    if not caps:
+        return False
+    # a mode switch writes 'stop:switch' and the new 'start:<mode>' in the same second: the start wins
+    latest = max(caps, key=lambda e: (e.start_ms, (e.title or "").startswith("start:")))
+    return (latest.title or "").startswith(("start:treino", "start:max"))
+
+
 def evaluate(conn: sqlite3.Connection, now_ms: int, tz: str) -> list[Alert]:
     """Evaluate all rules at `now_ms`, persist and return the alerts that fired now."""
     fired: list[Alert] = []
@@ -59,8 +93,7 @@ def evaluate(conn: sqlite3.Connection, now_ms: int, tz: str) -> list[Alert]:
     # agora: sustained high arousal while still
     ts, z = store.series(conn, M.AROUSAL_Z, now_ms - 10 * MIN, now_ms + 1, source=M.DERIVED)
     if z.size >= 8 and float(np.nanmean(z)) > 2.0 and not _recent(conn, "agora", now_ms - 60 * MIN):
-        _, steps = store.series(conn, M.STEPS_PM, now_ms - 10 * MIN, now_ms + 1)
-        if steps.size == 0 or float(np.nanmean(steps)) < 20:
+        if _still(conn, now_ms - 10 * MIN, now_ms + 1) and not _exercising(conn, now_ms):
             fired.append(Alert(f"agora:{now_ms // MIN}", "agora", now_ms,
                                "Ativação alta há 10 min. 1 min de respiração lenta?",
                                f"Ativação média de {np.nanmean(z):.1f} z nos últimos 10 min, parado."))

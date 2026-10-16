@@ -2,7 +2,8 @@
 # O relógio só fala HTTPS com certificado público (o Garmin Connect Mobile recusa autoassinado),
 # então o Caddy pega um certificado do Let's Encrypt para PULSO_DOMAIN.
 #   cp .env.example .env && editar && docker compose up -d
-#   docker compose exec api pulso token create fr255
+#   docker compose exec api pulso token create fr255             # token do relógio (envio + mostrador)
+#   docker compose exec api pulso token create painel --painel   # token do painel web (só leitura)
 services:
   api:
     build: ../central
@@ -15,7 +16,8 @@ services:
     build: ../central
     env_file: .env
     command: ["pulso", "daemon"]
-    volumes: ["pulso-data:/data", "garmin-tokens:/home/pulso/.garminconnect"]
+    # tokens do Garmin Connect ficam em /data/garminconnect (PULSO_GARMIN_TOKENS no Dockerfile)
+    volumes: ["pulso-data:/data"]
     restart: unless-stopped
 
   mcp:
@@ -37,5 +39,4 @@ services:
 
 volumes:
   pulso-data:
-  garmin-tokens:
   caddy-data:

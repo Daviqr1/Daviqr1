@@ -42,6 +42,8 @@ def main(argv: list[str] | None = None) -> int:
     tsub = t.add_subparsers(dest="tcmd", required=True)
     tc = tsub.add_parser("create")
     tc.add_argument("label")
+    tc.add_argument("--painel", action="store_true",
+                    help="token só de leitura para o painel web (não serve para o relógio enviar dados)")
     tr = tsub.add_parser("revoke")
     tr.add_argument("label")
 
@@ -122,6 +124,7 @@ def main(argv: list[str] | None = None) -> int:
     tz = args.tz or settings.tz
     db_path = args.db or settings.db_path
     conn = store.connect(db_path)
+    config.ensure_home()  # owner-only before an import/export writes the FIT archive, summaries, Google login
 
     if args.cmd == "serve":
         import uvicorn
@@ -136,8 +139,11 @@ def main(argv: list[str] | None = None) -> int:
         from pulso.ingest import auth
 
         if args.tcmd == "create":
-            print(auth.create_token(conn, args.label))
+            print(auth.create_token(conn, args.label, scope=auth.PAINEL if args.painel else auth.DEVICE))
             print("guarde este token: só o hash fica no banco", file=sys.stderr)
+            print("cole em /painel (só leitura; não serve no relógio)" if args.painel else
+                  "cole nas settings dos apps do relógio (envio e mostrador; o painel usa um token --painel)",
+                  file=sys.stderr)
         else:
             print(f"revogados: {auth.revoke(conn, args.label)}")
         return 0

@@ -1,13 +1,17 @@
 {$PULSO_DOMAIN} {
 	encode zstd gzip
-	# ingestão do relógio e estado do mostrador
+	# ingestão do relógio, estado do mostrador e dados do painel
 	handle /v1/* {
+		# lotes do relógio têm poucos KB; a API também corta em 64 KB (inclusive chunked)
+		request_body {
+			max_size 64KiB
+		}
 		reverse_proxy api:8080
 	}
 	handle /health {
 		reverse_proxy api:8080
 	}
-	# painel web (a página não tem dados; busca com o token do aparelho)
+	# painel web (a página não tem dados; busca com um token do painel: pulso token create <nome> --painel)
 	handle /painel {
 		reverse_proxy api:8080
 	}

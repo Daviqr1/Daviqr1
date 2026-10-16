@@ -11,7 +11,7 @@ Ele sobe, no mesmo processo:
 | Peça | Para quê |
 |---|---|
 | API de ingestão + painel (`localhost:8080`) | recebe o mostrador e o app pelo celular; painel em `/painel` |
-| Jobs | reanálise a cada 5 min, alertas, Garmin Connect a cada 6 h, sono/reuniões às 04:30, relatório às 06:30, resumo às 06:45 e a cada 2 h |
+| Jobs | reanálise e alertas a cada 5 min, Garmin Connect a cada 6 h (de hora em hora pela manhã até a noite passada chegar), sono/reuniões a partir das 04:30, a noite passada assim que chega, relatório às 06:30, os três resumos às 06:45 e o “Hoje” a cada 2 h ([horários](deploy.md#1-vps-ou-servidor-com-domínio-recomendado)) |
 | Ponte BLE (`--ble`) | o relógio manda direto para o notebook, sem celular |
 | Túnel (`--tunnel`) | HTTPS público para o celular alcançar o notebook |
 
@@ -42,7 +42,8 @@ Garmin Connect Mobile). A diferença é que o destino é a central no notebook, 
 
 Com o notebook dormindo ou desligado, o mostrador continua funcionando com o último estado. Os lotes
 do app de captura ficam na fila do relógio e saem quando a central volta. O histórico do relógio é
-recuperado pelo cursor na próxima sincronização, ou pelo Garmin Connect.
+recuperado pelo cursor na próxima sincronização, ou pelo Garmin Connect. Os jobs que perderam o horário
+rodam quando o notebook volta: sono/reuniões e os três resumos no mesmo dia, o relatório até 12:00.
 
 ## Checklist do primeiro dia
 

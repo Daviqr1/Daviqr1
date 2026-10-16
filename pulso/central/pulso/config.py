@@ -13,6 +13,22 @@ def home() -> Path:
     return Path(os.environ.get("PULSO_HOME", Path.home() / ".pulso")).expanduser()
 
 
+def ensure_home(create: bool = True) -> Path:
+    """Make home() owner-only, wherever the database lives: it holds the FIT archive, the summaries and
+    the Google login. Creates it 0700 before anything writes there, or tightens one an older version
+    left 0755. Best effort (a read-only HOME fails later, where something actually writes); never
+    touches $HOME or / when PULSO_HOME points there."""
+    h = home()
+    try:
+        if create:
+            h.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if h.exists() and h.resolve() not in (Path.home().resolve(), Path("/")):
+            os.chmod(h, 0o700)
+    except OSError:  # not ours (a bind mount owned by root) or not creatable
+        pass
+    return h
+
+
 def archive_dir() -> Path:
     return Path(os.environ.get("PULSO_ARCHIVE", home() / "fit-archive")).expanduser()
 

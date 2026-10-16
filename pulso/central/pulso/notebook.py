@@ -15,10 +15,12 @@ from __future__ import annotations
 
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 
 from pulso import config, scheduler, store
 
@@ -35,7 +37,13 @@ def _start_api(settings: config.Settings, host: str, port: int) -> threading.Thr
     return t
 
 
-def _start_tunnel(kind: str, port: int) -> tuple[subprocess.Popen | None, str | None]:
+# `tailscale funnel --bg` persists in tailscaled (across reboots) until removed. Removing exactly
+# the mount `--bg <port>` created ('/' on 443) leaves any other serve/funnel config untouched.
+TAILSCALE_OFF = ["funnel", "--https=443", "--set-path=/", "off"]
+
+
+def _start_tunnel(kind: str, port: int) -> tuple[Callable[[], None] | None, str | None]:
+    """Open the tunnel; return (stop, url). `stop` undoes it and must run on exit."""
     if kind == "cloudflared":
         exe = shutil.which("cloudflared")
         if not exe:
@@ -49,28 +57,70 @@ def _start_tunnel(kind: str, port: int) -> tuple[subprocess.Popen | None, str | 
             m = re.search(r"https://[a-z0-9-]+\.trycloudflare\.com", line or "")
             if m:
                 threading.Thread(target=lambda: [None for _ in p.stdout], daemon=True).start()  # drain
-                return p, m.group(0)
-        return p, None
+                return p.terminate, m.group(0)
+        return p.terminate, None
     if kind == "tailscale":
         exe = shutil.which("tailscale")
         if not exe:
             print("tailscale não encontrado (https://tailscale.com/download)")
             return None, None
-        subprocess.run([exe, "funnel", "--bg", str(port)], check=False)
+        if subprocess.run([exe, "funnel", "--bg", str(port)], check=False).returncode != 0:
+            return None, None  # nothing was set up, so nothing to undo (and never remove a config we did not make)
         st = subprocess.run([exe, "funnel", "status"], capture_output=True, text=True).stdout
         m = re.search(r"https://[^\s]+\.ts\.net", st)
-        return None, m.group(0) if m else None
+
+        def stop() -> None:
+            try:
+                r = subprocess.run([exe, *TAILSCALE_OFF], stdin=subprocess.DEVNULL, capture_output=True,
+                                   text=True, timeout=30)  # stdin may be a hung-up terminal
+                err = r.stderr.strip() if r.returncode != 0 else None
+            except (OSError, subprocess.SubprocessError) as e:
+                err = repr(e)
+            if err is not None:
+                print(f"não consegui desligar o Funnel: rode `tailscale {' '.join(TAILSCALE_OFF)}`\n{err}", file=sys.stderr)
+
+        return stop, m.group(0) if m else None
     return None, None
+
+
+def _sigterm(signum, frame) -> None:
+    # `kill`/systemd stop, or SIGHUP when the terminal closes or SSH drops: run the same cleanup as
+    # Ctrl+C (close the tunnel) instead of dying with the `--bg` Funnel still public
+    raise KeyboardInterrupt
+
+
+def _exit_signals() -> list[signal.Signals]:
+    sigs = [signal.SIGTERM]
+    # only a SIGHUP left at its default (death): `nohup` sets SIG_IGN and must keep it
+    if hasattr(signal, "SIGHUP") and signal.getsignal(signal.SIGHUP) == signal.SIG_DFL:
+        sigs.append(signal.SIGHUP)
+    return sigs
 
 
 def run(settings: config.Settings, host: str = "127.0.0.1", port: int = 8080, bridge: bool = False,
         tunnel: str | None = None, jobs: bool = True) -> None:
     store.connect(settings.db_path).close()  # create/migrate before the threads race for it
+    config.ensure_home()  # owner-only before the jobs write the FIT archive, summaries, Google login
     _start_api(settings, host, port)
     if jobs:
         threading.Thread(target=scheduler.loop, args=(settings,), name="pulso-jobs", daemon=True).start()
-    proc, url = _start_tunnel(tunnel, port) if tunnel else (None, None)
+    main = threading.current_thread() is threading.main_thread()
+    prev = {s: signal.signal(s, _sigterm) for s in _exit_signals()} if main else {}
+    stop_tunnel: Callable[[], None] | None = None
+    try:
+        stop_tunnel, url = _start_tunnel(tunnel, port) if tunnel else (None, None)
+        _serve(settings, port, tunnel, url, stop_tunnel is not None, bridge)
+    except KeyboardInterrupt:
+        print("encerrando", file=sys.stderr)
+    finally:
+        if stop_tunnel is not None:
+            stop_tunnel()
+        for s, h in prev.items():
+            signal.signal(s, h)
 
+
+def _serve(settings: config.Settings, port: int, tunnel: str | None, url: str | None, tunnel_up: bool,
+           bridge: bool) -> None:
     print(f"""
 Pulso rodando no notebook
   banco        {settings.db_path}
@@ -79,20 +129,17 @@ Pulso rodando no notebook
   túnel        {url or ('—' if not tunnel else 'não detectado (veja a saída do túnel)')}
   Claude Code  claude mcp add pulso -- pulso mcp      (ou use o .mcp.json do projeto)
   relógio      URL da central = {url or 'https://<seu túnel>'} ; token = pulso token create fr255
+  painel web   token só de leitura = pulso token create painel --painel
 """, flush=True)
+    if tunnel == "tailscale" and tunnel_up:
+        print(f"  o Funnel é desligado ao sair; se o processo morrer: tailscale {' '.join(TAILSCALE_OFF)}\n", flush=True)
 
-    try:
-        if bridge:
-            import asyncio
+    if bridge:
+        import asyncio
 
-            from pulso.bridge.peripheral import local_sink, serve
+        from pulso.bridge.peripheral import local_sink, serve
 
-            asyncio.run(serve(local_sink(str(settings.db_path))))
-        else:
-            while True:
-                time.sleep(3600)
-    except KeyboardInterrupt:
-        print("encerrando", file=sys.stderr)
-    finally:
-        if proc is not None:
-            proc.terminate()
+        asyncio.run(serve(local_sink(str(settings.db_path))))
+    else:
+        while True:
+            time.sleep(3600)

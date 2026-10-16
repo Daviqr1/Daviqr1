@@ -87,3 +87,61 @@ def test_backfill_is_resumable_and_cold_aware():
     assert "frio" in " ".join(rep[old.isoformat()]["problems"])
     # cold days are not marked as synced, so a later run fetches them again
     assert conn.execute("SELECT 1 FROM artefacts WHERE kind = 'gc_synced' AND key = ?", (old.isoformat(),)).fetchone() is None
+
+
+def test_day_synced_while_filling_in_is_fetched_again(monkeypatch):
+    """F12: a sync on day D (say at 18:00) must not mark D as synced, or a later backfill skips the
+    rest of that day (and its wellness FIT zip) for good."""
+    from datetime import date
+
+    calls = []
+
+    class Counting(FakeGarmin):
+        def get_heart_rates(self, d):
+            calls.append(d)
+            return super().get_heart_rates(d)
+
+    clock = {"today": date(2026, 10, 14)}
+
+    class Day(date):
+        @classmethod
+        def today(cls):
+            return clock["today"]
+
+    monkeypatch.setattr(gc, "date", Day)
+    conn = store.connect(":memory:")
+    gc.sync(conn, days=1, client=Counting(), pause_s=0, log=lambda m: None)
+    assert calls == ["2026-10-14"]
+    clock["today"] = date(2026, 10, 17)
+    calls.clear()
+    gc.sync(conn, days=7, client=Counting(), pause_s=0, log=lambda m: None)
+    assert "2026-10-14" in calls and len(calls) == 7
+    calls.clear()
+    gc.sync(conn, days=7, client=Counting(), pause_s=0, log=lambda m: None)
+    assert calls == ["2026-10-17", "2026-10-16"]  # complete days are skipped now, the last 2 never
+
+
+def test_login_failure_is_an_error_not_an_exit(monkeypatch):
+    """F1: SystemExit from the client stopped the daemon's loop (and silently killed the notebook's
+    jobs thread). Expired tokens without credentials, or a missing extra, are a plain error."""
+    import sys
+    from types import SimpleNamespace
+
+    import pytest
+
+    class Garmin:
+        def __init__(self, *a, **k):
+            pass
+
+        def login(self, tokens):
+            raise ConnectionError("offline")
+
+    monkeypatch.delenv("GARMIN_EMAIL", raising=False)
+    monkeypatch.delenv("GARMIN_PASSWORD", raising=False)
+    monkeypatch.setitem(sys.modules, "garminconnect", SimpleNamespace(Garmin=Garmin))
+    with pytest.raises(gc.GarminLoginError) as e:
+        gc._client()
+    assert not isinstance(e.value, SystemExit) and "GARMIN_EMAIL" in str(e.value) and "offline" in str(e.value)
+    monkeypatch.setitem(sys.modules, "garminconnect", None)  # the `garmin` extra is not installed
+    with pytest.raises(gc.GarminLoginError):
+        gc._client()

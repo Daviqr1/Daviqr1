@@ -36,6 +36,7 @@ class StatusView extends WatchUi.View {
         _s[:press] = WatchUi.loadResource(Rez.Strings.PressStart) as String;
         _s[:queue] = WatchUi.loadResource(Rez.Strings.Queue) as String;
         _s[:nocfg] = WatchUi.loadResource(Rez.Strings.NoCentral) as String;
+        _s[:bridge] = WatchUi.loadResource(Rez.Strings.Bridge) as String;
         _s[:nophone] = WatchUi.loadResource(Rez.Strings.NoPhone) as String;
         _s[:sending] = WatchUi.loadResource(Rez.Strings.Sending) as String;
         _s[:auth] = WatchUi.loadResource(Rez.Strings.AuthErr) as String;
@@ -316,14 +317,26 @@ class StatusView extends WatchUi.View {
         var st = u.status;
         var retry = u.retryIn(nowS);
         var rs = (retry > 0) ? " (" + ago(retry) + ")" : "";
-        if (!Cfg.hasCentral()) {
-            _linkTxt = _s[:nocfg] as String;
-            _linkColor = Ui.WARN;
+        var ble = _cap.ble;
+        var bridge = _s[:bridge] as String;
+        if (st == Link.NOCFG || (st == Link.IDLE && !Cfg.hasCentral())) {
+            // no route right now; without a central URL the bridge is the route, so show its state
+            if (ble.state == BleSt.OFF) {
+                _linkTxt = _s[:nocfg] as String;
+                _linkColor = Ui.WARN;
+            } else if (ble.authFail) {
+                _linkTxt = bridge + ": " + (_s[:auth] as String);
+                _linkColor = Ui.ERR;
+            } else {
+                _linkTxt = bridge + " " + ble.stateName();
+                _linkColor = ble.ready() ? Ui.OK : Ui.WARN;
+            }
         } else if (st == Link.SENDING) {
             _linkTxt = _s[:sending] as String;
             _linkColor = Ui.DIM;
         } else if (st == Link.NOPHONE) {
-            _linkTxt = (_s[:nophone] as String) + rs;
+            // BLE_CONNECTION_UNAVAILABLE: the phone, or the bridge when the batch went that way
+            _linkTxt = (u.transportName().equals("ble") ? bridge + " " + ble.stateName() : _s[:nophone] as String) + rs;
             _linkColor = Ui.WARN;
         } else if (st == Link.AUTH) {
             _linkTxt = _s[:auth] as String;
@@ -340,13 +353,15 @@ class StatusView extends WatchUi.View {
         }
     }
 
-    //! "ble ok 6.1f/s q3 -0 b12": state, frames/s, stream units queued, units dropped, batches sent
+    //! "ble ok 6.1f/s q3 -0 b12": state ("token" when the bridge does not know ours), frames/s,
+    //! stream units queued, units dropped, batches sent
     private function bleText() as String {
         var b = _cap.ble;
         if (b.state == BleSt.OFF) {
             return "ble off";
         }
-        return "ble " + b.stateName() + " " + b.frameRate.format("%.1f") + "f/s q" + b.queuedUnits().toString()
+        var name = (b.authFail && !b.ready()) ? "token" : b.stateName();
+        return "ble " + name + " " + b.frameRate.format("%.1f") + "f/s q" + b.queuedUnits().toString()
             + " -" + b.dropped.toString() + " b" + b.blobsOk.toString();
     }
 

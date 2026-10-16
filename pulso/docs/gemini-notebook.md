@@ -27,7 +27,9 @@ notebook):
 Só números calculados — sem séries cruas, sem texto de transcrição — e colegas como “Pessoa A, B…”
 (`--com-nomes` desliga). Cópias locais em `~/.pulso/resumos/`.
 
-Horários (no `pulso notebook`/`pulso daemon`): relatório 06:30, Docs 06:45, e o “Hoje” de novo a cada 2 h.
+Horários (no `pulso notebook`/`pulso daemon`): relatório 06:30, os três Docs 06:45, e o “Hoje” sozinho de novo
+a cada 2 h. Com a máquina dormindo nesses horários, o relatório sai quando ela volta (até 12:00) e os Docs
+também.
 
 ## Configuração (uma vez, ~10 min)
 

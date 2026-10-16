@@ -10,11 +10,12 @@ kind of moment; the model only labels, it never sees physiology.
 from __future__ import annotations
 
 import json
-import os
+import re
 import sqlite3
 from datetime import date
 
 from pulso import analysis, config, store
+from pulso.ai.names import me_aliases  # shared with the report/export pseudonyms
 from pulso.importers.transcripts import segments_for
 
 TAGS = [
@@ -57,23 +58,23 @@ SCHEMA = {
 CHUNK = 250
 
 
-def me_aliases() -> set[str]:
-    raw = os.environ.get("PULSO_ME", "eu,me,davi,gabi")
-    return {a.strip().lower() for a in raw.split(",") if a.strip()}
-
-
 def pseudonymise(segs: list[dict]) -> tuple[list[str], dict[str, str]]:
     me = me_aliases()
     mapping: dict[str, str] = {}
     lines = []
     for s in segs:
-        spk = (s.get("speaker") or "?").strip()
+        spk = (s.get("speaker") or "").strip() or "?"
         if spk.lower() in me or spk.lower().split()[0] in me:
             alias = "EU"
         else:
             alias = mapping.setdefault(spk, f"S{len(mapping) + 1}")
         lines.append(f"{s['idx']}|{alias}|{s['text']}")
     return lines, {v: k for k, v in mapping.items()}
+
+
+def _unmask(text: str, back: dict[str, str]) -> str:
+    """S1, S2... in Claude's topics/summary back to the speakers' names (kept locally)."""
+    return re.sub(r"\bS\d+\b", lambda m: back.get(m.group(0), m.group(0)), text)
 
 
 def tag_meeting(conn: sqlite3.Connection, event_id: str, settings: config.Settings | None = None, client=None) -> dict:
@@ -88,7 +89,7 @@ def tag_meeting(conn: sqlite3.Connection, event_id: str, settings: config.Settin
     tagged = 0
     for k in range(0, len(segs), CHUNK):
         part = segs[k : k + CHUNK]
-        lines, _ = pseudonymise(part)
+        lines, back = pseudonymise(part)
         user = "Etiquetas permitidas: " + ", ".join(TAGS) + "\n\nTrechos (idx|falante|texto):\n" + "\n".join(lines)
         out, _usage = structured(SYSTEM, user, SCHEMA, model=settings.tagger_model, effort="low",
                                  max_tokens=16000, settings=settings, client=client)
@@ -104,8 +105,8 @@ def tag_meeting(conn: sqlite3.Connection, event_id: str, settings: config.Settin
                 conn.execute("UPDATE transcript_segments SET tags = ? WHERE event_id = ? AND idx = ?",
                              (json.dumps(tags + [f"intensidade_{r['intensity']}"], ensure_ascii=False), event_id, s["idx"]))
                 tagged += 1
-        topics += out.get("topics", [])
-        summaries.append(out.get("summary", ""))
+        topics += [_unmask(t, back) for t in out.get("topics", [])]
+        summaries.append(_unmask(out.get("summary", ""), back))
     ev = conn.execute("SELECT attrs FROM events WHERE id = ?", (event_id,)).fetchone()
     attrs = json.loads(ev["attrs"]) if ev else {}
     attrs["ai"] = {"topics": sorted(set(topics))[:12], "summary": " ".join(summaries)[:1500]}

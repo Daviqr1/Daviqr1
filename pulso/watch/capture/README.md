@@ -68,7 +68,9 @@ de “botão de estresse” mesmo parado.
 Atividades e apps → Pulso Captura → Configurações.
 
 **App instalado manualmente (sideload)**: o Garmin Connect não edita configurações de apps fora da loja.
-Coloque os valores no build, num arquivo que **não vai para o git** (`local/` está no `.gitignore`):
+Coloque os valores no build, num arquivo que **não vai para o git** (`local/` está no `.gitignore`). O
+token também fica dentro do `.prg` e do `PulsoCaptura-settings.json` que o build gera: compile sempre para
+`watch/capture/bin/` (abaixo) e nunca versione essas saídas (`*.prg` e `*-settings.json` estão no `.gitignore`).
 
 ```xml
 <!-- watch/capture/local/properties.xml -->
@@ -78,7 +80,8 @@ Coloque os valores no build, num arquivo que **não vai para o git** (`local/` e
 </properties>
 ```
 
-Sem central configurada a captura funciona normalmente, guarda na fila e a tela mostra “configure a central”.
+Sem central configurada a captura funciona normalmente, guarda na fila e a tela mostra “configure a central”
+(ou, com a ponte BLE ligada, o estado da ponte e dos envios por ela).
 
 ## Para onde vão os dados
 
@@ -92,12 +95,18 @@ Sem central configurada a captura funciona normalmente, guarda na fila e a tela 
    `pulso notebook --ble` / `pulso bridge watch` (`BleLink.mc`). Por ela vão:
    - o **acelerômetro bruto** ao vivo, na taxa da captura — grande demais para o celular. Fila de ~40 s no
      relógio; se a ponte não acompanha, o segundo mais antigo inteiro é descartado (nunca meio segundo);
-   - os **lotes da fila** quando o celular não está conectado, quando o lote passa de 6 KB ou quando não há
-     URL de central configurada: JSON assinado com HMAC-SHA256 (chave = SHA-256 do token), apagado da fila só
-     depois que a ponte confirma que gravou.
+   - os **lotes da fila** quando o celular não está conectado, quando o lote passa de 6 KB, quando não há
+     URL de central configurada ou nos 10 min depois de uma falha do caminho do celular que não seja do
+     próprio lote (túnel caído, URL velha, timeout, 404/5xx; o lote que falhou vai para a ponte na hora):
+     JSON assinado com HMAC-SHA256 (chave = SHA-256 do token, sobre o `q` e o JSON), apagado da fila só
+     depois de uma confirmação da ponte assinada com a mesma chave (gravado, ou conteúdo recusado com
+     400/413/422).
 
-   Roteamento por lote (`Uploader.route`): celular é o padrão; BLE nos três casos acima. A tela de detalhes
-   mostra `ble <estado> <frames/s> q<fila> -<descartados> b<lotes>` e por onde saiu o último lote.
+   Antes de mandar qualquer coisa o relógio confere a ponte (HELLO: ela precisa provar que tem a chave do
+   token), então um aparelho que só imita o serviço não recebe nada nem apaga lote. Roteamento por lote
+   (`Uploader.route`): celular é o padrão; BLE nos casos acima. A tela de detalhes mostra
+   `ble <estado> <frames/s> q<fila> -<descartados> b<lotes>` (estado `token` = a ponte não conhece o token)
+   e por onde saiu o último lote.
    Use o **mesmo token** no relógio e na ponte remota (`pulso bridge watch --central … --token …`); com
    `pulso notebook --ble` a ponte confere contra os tokens do próprio banco.
 
@@ -190,14 +199,15 @@ Requer o Connect IQ SDK (9.x) e uma chave de desenvolvedor:
 openssl genrsa -out developer_key.pem 4096
 openssl pkcs8 -topk8 -inform PEM -outform DER -in developer_key.pem -out developer_key.der -nocrypt
 
-monkeyc -d fr255 -f watch/capture/monkey.jungle -o PulsoCaptura.prg -y developer_key.der -l 3 -w
+mkdir -p watch/capture/bin
+monkeyc -d fr255 -f watch/capture/monkey.jungle -o watch/capture/bin/PulsoCaptura.prg -y developer_key.der -l 3 -w
 ```
 
 Compila com **zero erros e zero avisos** em `-l 3` (tipagem estrita) e `-l 2`, contra os arquivos de
 dispositivo do FR255 (API 5.2).
 
 Sideload: conecte o relógio por USB (no Linux aparece como MTP: `gio mount`, `jmtpfs` ou o gerenciador
-de arquivos; no macOS, OpenMTP), copie `PulsoCaptura.prg` para `GARMIN/APPS/` e desconecte. O app aparece
+de arquivos; no macOS, OpenMTP), copie `watch/capture/bin/PulsoCaptura.prg` para `GARMIN/APPS/` e desconecte. O app aparece
 na lista de atividades/apps. Para atualizar, substitua o arquivo; a fila e o id do aparelho continuam no
 armazenamento do app.
 
@@ -210,14 +220,17 @@ armazenamento do app.
 - filtro + RMSSD com 5 % de artefatos (erro mediano ~3 %; sem filtro, centenas de %);
 - horário dos batimentos reconstruído pela central (p95 < 100 ms);
 - governador em malha fechada com bateria de 1 %;
-- um lote no formato do relógio passando pelo validador e pelo `ingest()` da central, inclusive o reenvio duplicado.
+- um lote no formato do relógio passando pelo validador e pelo `ingest()` da central, inclusive o reenvio duplicado;
+- os frames da ponte BLE contra o decodificador real da ponte: HELLO e a prova, lote depois de uma tentativa
+  abandonada, confirmação assinada (outra tentativa, outro lote, outro nonce ou outra chave é ignorada),
+  SYNC perdido sem datar errado e o filtro que recusa RR/FC/marcações no fluxo aberto.
 
 ```bash
 python3 watch/capture/tests/check_watch_algos.py     # numpy + pydantic
 ```
 
-São transliterações à mão: quem mudar `HrvLive.mc`, `AccelFeatures.mc`, `BatchBuilder.mc` ou
-`Governor.mc` deve atualizar o teste junto.
+São transliterações à mão: quem mudar `HrvLive.mc`, `AccelFeatures.mc`, `BatchBuilder.mc`, `Governor.mc`
+ou `BleLink.mc` deve atualizar o teste junto.
 
 ## Arquivos
 
@@ -230,7 +243,7 @@ São transliterações à mão: quem mudar `HrvLive.mc`, `AccelFeatures.mc`, `Ba
 | `source/BatchBuilder.mc` | lote aberto no formato do protocolo + estimativa de tamanho |
 | `source/UploadQueue.mc` | fila persistente limitada, sequência `q` |
 | `source/Uploader.mc`, `source/Transport.mc` | envio com backoff e roteamento celular/BLE; `HttpTransport`, `BleTransport` |
-| `source/BleLink.mc`, `source/Json.mc` | ponte BLE (scan, conexão, frames de 20 B, lotes assinados); JSON → bytes |
+| `source/BleLink.mc`, `source/Json.mc` | ponte BLE (scan, conexão, HELLO, frames de 20 B, lotes assinados e confirmações conferidas); JSON → bytes |
 | `source/Governor.mc` | governador de bateria |
 | `source/FitRecorder.mc` | sessão FIT, SensorLogger, campos de desenvolvedor |
 | `source/StatusView.mc`, `source/Delegates.mc` | tela, botões e menus |

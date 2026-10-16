@@ -9,6 +9,19 @@ data/
 *.sqlite-shm
 .env
 watch/**/bin/
-watch/**/*.prg
 watch/**/*.iq
 developer_key*
+
+# Connect IQ build output, wherever monkeyc was pointed (-o): a sideload build bakes the device
+# token from local/properties.xml into the .prg and into <name>-settings.json
+*.prg
+*.prg.debug.xml
+*.iq
+*-settings.json
+*-fit_contributions.json
+internal-mir/
+watch/**/gen/
+watch/**/mir/
+watch/*/local/
+*.der
+*.pem

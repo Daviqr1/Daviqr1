@@ -33,17 +33,20 @@ def arousal_range(conn: sqlite3.Connection, start_ms: int, end_ms: int) -> tuple
 # ------------------------------------------------------------------------------- meetings
 
 
+def dedup_meetings(evs: list[store.Event]) -> list[store.Event]:
+    """A transcript and its calendar entry describe the same meeting: keep the transcript one."""
+    meets = [e for e in evs if e.kind == "meeting"]
+    covered = {e.attrs.get("start_source", "").removeprefix("calendar:") for e in meets}
+    return meets + [e for e in evs if e.kind == "calendar" and e.id not in covered
+                    and not any(abs(m.start_ms - e.start_ms) < 10 * MIN for m in meets)]
+
+
 def meeting_job(conn: sqlite3.Connection, start: date, end: date, tz: str) -> dict:
     """Per-meeting responses, the matched-control test, and in-meeting segment effects."""
     a, _ = analysis.local_day_bounds(start, tz)
     _, b = analysis.local_day_bounds(end, tz)
     ts, z = arousal_range(conn, a - 42 * DAY, b + DAY)  # controls look ±6 weeks around
-    evs = store.events(conn, a, b, kinds=["meeting", "calendar"])
-    # a transcript and its calendar entry describe the same meeting: keep the transcript one
-    meets = [e for e in evs if e.kind == "meeting"]
-    covered = {e.attrs.get("start_source", "").removeprefix("calendar:") for e in meets}
-    meets += [e for e in evs if e.kind == "calendar" and e.id not in covered
-              and not any(abs(m.start_ms - e.start_ms) < 10 * MIN for m in meets if m.kind == "meeting")]
+    meets = dedup_meetings(store.events(conn, a, b, kinds=["meeting", "calendar"]))
     busy = store.events(conn, a - 42 * DAY, b + 42 * DAY, kinds=["meeting", "calendar"])
 
     responses = []
@@ -117,62 +120,134 @@ def _n(x: float) -> float | None:
 # ---------------------------------------------------------------------------------- sleep
 
 
+# readiness compares the 7-day mean with the 60-day normal range, debt sums 14 days: every night is
+# scored on a calendar-day grid reaching this far back, whatever range the caller asked for
+SLEEP_CONTEXT_DAYS = 60
+# a later epoch within this gap would still join the night (sleep.nights_from_epochs), so a night is
+# only final, and only written, once its last epoch is this old, or once Garmin has closed it (its
+# 'sleep' event, the main sleep period of dailySleepDTO, ends where the night ends)
+NIGHT_OPEN_MIN = 90
+STAGING_PREFERENCE = ("fit", "gc")  # Garmin's own staging first; anything else only when alone
+
+
+def _staging_source(families: np.ndarray) -> str:
+    present = set(families.tolist())
+    for f in STAGING_PREFERENCE:
+        if f in present:
+            return f
+    vals, counts = np.unique(families, return_counts=True)
+    return str(vals[int(np.argmax(counts))])
+
+
+def _night_rmssd(conn: sqlite3.Connection, onset: int, offset: int) -> float:
+    """Median 5-min RMSSD of the night's RR (one source per minute), else Garmin's readings."""
+    rr_ts, rr = analysis.best_rr(conn, onset, offset)
+    rm = math.nan
+    if rr.size > 300:
+        from pulso.signal import hrv
+        from pulso.signal.rr import clean_rr
+
+        wins = hrv.rolling(clean_rr(rr_ts, rr), window_s=300, step_s=300)
+        if wins:
+            rm = float(np.median([w.rmssd for w in wins]))
+    if math.isnan(rm):
+        _, g = store.series(conn, M.HRV_GARMIN, onset, offset)
+        if g.size:
+            rm = float(np.mean(g))
+    return rm
+
+
 def sleep_job(conn: sqlite3.Connection, start: date, end: date, tz: str, need_min: float = 450.0) -> list[dict]:
-    a, _ = analysis.local_day_bounds(start - timedelta(days=1), tz)
+    """Summarise the nights that ended (wake day) in [start, end] and write `sleep:night` for each.
+
+    Each night gets its own trailing context: debt and HRV status are computed on a calendar-day grid
+    reaching SLEEP_CONTEXT_DAYS back (missing nights are gaps, not skipped), so a short run — the
+    morning refresh, `analyze --days 1` — scores a night exactly like a long one. Nights before
+    `start` are context only (their stored summary when there is one) and are never rewritten.
+    Staging comes from one source per night (fit > gc > other), and a night that may still be filling
+    in (last epoch less than NIGHT_OPEN_MIN old, not closed by Garmin) is left for a later run."""
+    first = start - timedelta(days=SLEEP_CONTEXT_DAYS)
+    # from the evening before the first wake day, so no night kept below is clipped at the bound
+    a, _ = analysis.local_day_bounds(first - timedelta(days=1), tz)
     _, b = analysis.local_day_bounds(end, tz)
     rows = conn.execute(
         "SELECT ts_ms, duration_s, stage, source FROM sleep_epochs WHERE ts_ms >= ? AND ts_ms < ? ORDER BY ts_ms", (a, b)
     ).fetchall()
     if not rows:
         return []
-    # one staging source per night: prefer Garmin's own (fit/gc) over anything else
-    by_src: dict[str, list] = {}
-    for r in rows:
-        by_src.setdefault(r["source"].split(":")[0], []).append(r)
-    src_rows = by_src.get("fit") or by_src.get("gc") or next(iter(by_src.values()))
-    ep_ts = np.array([r["ts_ms"] for r in src_rows], dtype=np.int64)
-    ep_du = np.array([r["duration_s"] for r in src_rows], dtype=np.float64)
-    ep_st = np.array([r["stage"] for r in src_rows])
+    ep_ts = np.array([r["ts_ms"] for r in rows], dtype=np.int64)
+    ep_du = np.array([r["duration_s"] for r in rows], dtype=np.float64)
+    ep_st = np.array([r["stage"] for r in rows])
+    ep_fam = np.array([r["source"].split(":")[0] for r in rows])
+    final_before = store.now_ms() - NIGHT_OPEN_MIN * MIN
+    closed = [e.end_ms for e in store.events(conn, a, b, kinds=["sleep"])]
 
-    hr_ts, hr = store.series(conn, M.HR, a, b)
+    def final(offset: int) -> bool:
+        return offset <= final_before or any(abs(t - offset) <= 15 * MIN for t in closed)
+
+    by_day: dict[str, dict] = {}  # wake day -> main sleep (most sleep) of that day
+    for u_on, u_off in sleep.nights_from_epochs(ep_ts, ep_du, ep_st):  # all sources together
+        inside = (ep_ts >= u_on) & (ep_ts < u_off)
+        m = inside & (ep_fam == _staging_source(ep_fam[inside]))
+        s_ts, s_du, s_st = ep_ts[m], ep_du[m], ep_st[m]
+        for onset, offset in sleep.nights_from_epochs(s_ts, s_du, s_st):
+            wake = _day_of(offset, tz)
+            if wake < first or wake > end or not final(offset):
+                continue
+            key = wake.isoformat()
+            if wake < start:
+                cached = store.get_artefact(conn, "sleep:night", key)
+                if cached and cached.get("total_sleep_min") is not None:
+                    if key not in by_day or cached["total_sleep_min"] > by_day[key]["total_sleep_min"]:
+                        by_day[key] = cached | {"_context": True}
+                    continue
+            hr_ts, hr = store.series(conn, M.HR, onset, offset)
+            n = sleep.summarize_night(onset, offset, s_ts, s_du, s_st, hr_ts, hr, _night_rmssd(conn, onset, offset))
+            d = n.as_dict() | {"wake_day": key, "_context": wake < start}
+            if key not in by_day or d["total_sleep_min"] > by_day[key]["total_sleep_min"]:
+                by_day[key] = d
+
+    days = [first + timedelta(days=k) for k in range((end - first).days + 1)]
+    grid_n = [by_day.get(d.isoformat()) for d in days]
+    debts = sleep.sleep_debt([n["total_sleep_min"] if n else None for n in grid_n], need_min=need_min)
+    lnr = np.array([math.log(n["rmssd_night"]) if n and n.get("rmssd_night") else np.nan for n in grid_n])
+    ready = baseline.hrv_readiness([d.isoformat() for d in days], lnr)
     nights = []
-    for onset, offset in sleep.nights_from_epochs(ep_ts, ep_du, ep_st):
-        rr_ts, rr = store.rr(conn, onset, offset)
-        rm = math.nan
-        if rr.size > 300:
-            from pulso.signal import hrv
-            from pulso.signal.rr import clean_rr
-
-            cl = clean_rr(rr_ts, rr)
-            wins = hrv.rolling(cl, window_s=300, step_s=300)
-            if wins:
-                rm = float(np.median([w.rmssd for w in wins]))
-        g_ts, g = store.series(conn, M.HRV_GARMIN, onset, offset)
-        if math.isnan(rm) and g.size:
-            rm = float(np.mean(g))
-        n = sleep.summarize_night(onset, offset, ep_ts, ep_du, ep_st, hr_ts, hr, rm)
-        d = n.as_dict() | {"wake_day": _day_of(offset, tz).isoformat()}
-        nights.append(d)
-
-    debts = sleep.sleep_debt([n["total_sleep_min"] for n in nights], need_min=need_min)
-    lnr = np.array([math.log(n["rmssd_night"]) if n.get("rmssd_night") else np.nan for n in nights])
-    ready = baseline.hrv_readiness([n["wake_day"] for n in nights], lnr)
     with store.transaction(conn):
-        for i, n in enumerate(nights):
+        for i, n in enumerate(grid_n):
+            if n is None or n.pop("_context"):
+                continue
             n["debt_min"] = debts[i]
             n["hrv_status"] = ready.status[i]
             n["hrv_ms"] = n.get("rmssd_night")
             n["ln_rmssd_7d"] = None if math.isnan(ready.roll7[i]) else round(float(ready.roll7[i]), 3)
             store.put_artefact(conn, "sleep:night", n["wake_day"], n)
-        if nights:
-            store.put_artefact(conn, "sleep:last", "latest", nights[-1])
+            nights.append(n)
+        last = store.get_artefact(conn, "sleep:last", "latest")
+        if nights and (not last or str(last.get("wake_day", "")) <= nights[-1]["wake_day"]):
+            store.put_artefact(conn, "sleep:last", "latest", nights[-1])  # never moved back by an old range
 
-    # regularity over the whole range from asleep minutes
+    # regularity over the requested range from asleep minutes
+    a, _ = analysis.local_day_bounds(start - timedelta(days=1), tz)
     bins = np.arange(a, b, MIN, dtype=np.int64)
     mask = analysis.sleep_mask(conn, bins).astype(float)
     sri = sleep.sleep_regularity_index(mask) if bins.size >= 2 * 1440 else math.nan
     store.put_artefact(conn, "sleep:regularity", f"{start.isoformat()}..{end.isoformat()}", {"sri": _n(sri)})
     return nights
+
+
+def last_night(conn: sqlite3.Connection, today: date, tz: str) -> dict | None:
+    """Morning refresh: the night that ended today, summarised as soon as its staging is in and
+    final (Garmin publishes it after the wake-up sync, hours after the 04:30 range job). Returns it,
+    or None while it is still missing."""
+    night = store.get_artefact(conn, "sleep:night", today.isoformat())
+    if night is not None:
+        return night
+    a, _ = analysis.local_day_bounds(today, tz)
+    if conn.execute("SELECT 1 FROM sleep_epochs WHERE ts_ms >= ? LIMIT 1", (a - 12 * 60 * MIN,)).fetchone() is None:
+        return None  # nothing staged since yesterday noon
+    sleep_job(conn, today, today, tz)
+    return store.get_artefact(conn, "sleep:night", today.isoformat())
 
 
 # ----------------------------------------------------------------------------- daily table
@@ -192,7 +267,7 @@ def daily_table(conn: sqlite3.Connection, start: date, end: date, tz: str) -> li
         a, b = analysis.local_day_bounds(d, tz)
         day = store.get_artefact(conn, "analysis:day", d.isoformat()) or {}
         night = store.get_artefact(conn, "sleep:night", d.isoformat()) or {}
-        meets = store.events(conn, a, b, kinds=["meeting", "calendar"])
+        meets = dedup_meetings(store.events(conn, a, b, kinds=["meeting", "calendar"]))
         commits = store.events(conn, a, b, kinds=["commit"])
         late = 0
         for c in commits:

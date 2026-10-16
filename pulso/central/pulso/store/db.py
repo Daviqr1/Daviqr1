@@ -8,6 +8,7 @@ natural key, so re-importing the same FIT file or retrying an upload is harmless
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import time
 from collections.abc import Iterable, Iterator, Sequence
@@ -19,7 +20,9 @@ from typing import Any
 
 import numpy as np
 
-SCHEMA_VERSION = 1
+from pulso import config
+
+SCHEMA_VERSION = 2  # v2: device_tokens.scope
 
 
 def now_ms() -> int:
@@ -30,7 +33,7 @@ def connect(path: str | Path) -> sqlite3.Connection:
     """Open the store, creating and migrating it if needed."""
     path = str(path)
     if path != ":memory:":
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        _private_db_file(Path(path))
     conn = sqlite3.connect(path, timeout=30, isolation_level=None, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode = WAL")
@@ -38,18 +41,57 @@ def connect(path: str | Path) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA busy_timeout = 30000")
     _migrate(conn)
+    if path != ":memory:":
+        # databases created by older versions: tighten what is already there (-wal/-shm included)
+        for f in (path, path + "-wal", path + "-shm"):
+            _chmod(f, 0o600)
     return conn
+
+
+def _private_db_file(p: Path) -> None:
+    """Health data and token digests (which double as BLE MAC keys) are owner-only: a new directory
+    is created 0700 and ~/.pulso is tightened if an older version left it world-readable, even when
+    PULSO_DB points elsewhere (it still holds the FIT archive); the database file is created 0600
+    before SQLite opens it, and SQLite gives -wal/-shm its mode."""
+    d = p.parent
+    if not d.exists():
+        d.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # only our own directory; an existing parent the user chose for PULSO_DB keeps its mode
+    config.ensure_home(create=False)
+    if not p.exists():
+        os.close(os.open(p, os.O_WRONLY | os.O_CREAT, 0o600))  # an empty file is an empty database
+
+
+def _chmod(path: str | Path, mode: int) -> None:
+    try:
+        os.chmod(path, mode)
+    except OSError:  # missing (-wal/-shm come and go with the WAL) or owned by someone else
+        pass
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
     sql = resources.files("pulso.store").joinpath("schema.sql").read_text(encoding="utf-8")
     conn.executescript(sql)
+    # columns added after v1: CREATE TABLE IF NOT EXISTS leaves existing tables as they were
+    _add_column(conn, "device_tokens", "scope", "TEXT NOT NULL DEFAULT 'device'")
     row = conn.execute("SELECT MAX(version) AS v FROM schema_version").fetchone()
-    if row["v"] is None:
+    if row["v"] is None or row["v"] < SCHEMA_VERSION:
         conn.execute(
-            "INSERT INTO schema_version (version, applied_ms) VALUES (?, ?)",
+            "INSERT OR IGNORE INTO schema_version (version, applied_ms) VALUES (?, ?)",
             (SCHEMA_VERSION, now_ms()),
         )
+
+
+def _add_column(conn: sqlite3.Connection, table: str, column: str, decl: str) -> None:
+    def has() -> bool:
+        return column in {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+
+    if has():
+        return
+    # re-check under the write lock: the api, jobs and mcp services may start together
+    with transaction(conn):
+        if not has():
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
 
 @contextmanager

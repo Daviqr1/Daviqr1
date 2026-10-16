@@ -2,13 +2,16 @@
 
 The report model never sees raw series. It receives a numbered list of *facts* — sentences
 with numbers already computed by the deterministic pipeline — and must cite fact ids for every
-claim. Then the numbers gate checks that every number and clock time it wrote exists in the facts
-it cited (tolerating rounding). An insight that fails the gate is not published; it is listed
-under "rejected" so you can see what the model tried to say.
+claim. Then the numbers gate checks that every number, date, weekday and clock time it wrote exists
+in the facts it cited (tolerating rounding only), with or without a unit glued to it ("25ms", "14h"),
+small counts and number words ("onze") included. An insight that fails the gate is not published; it is listed under "rejected" so
+you can see what the model tried to say. Colleagues' names are pseudonymised before the facts leave
+the machine (see `ai.names` and `report.generate`).
 """
 
 from __future__ import annotations
 
+import json
 import math
 import re
 import sqlite3
@@ -28,8 +31,22 @@ def fmt(x: float | int | None, nd: int = 1) -> str:
     return f"{x:.{nd}f}".replace(".", ",")
 
 
+def pct(frac: float | None) -> float | None:
+    """0..1 -> percent; missing stays missing (never an invented 0 %)."""
+    return None if frac is None or (isinstance(frac, float) and math.isnan(frac)) else frac * 100
+
+
 def hhmm(ms: int, tz: str) -> str:
     return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).astimezone(ZoneInfo(tz)).strftime("%H:%M")
+
+
+WEEKDAYS = ["segunda-feira", "terça-feira", "quarta-feira", "quinta-feira", "sexta-feira", "sábado", "domingo"]
+
+
+def day_label(d: date | str) -> str:
+    """'2026-10-15 (quinta-feira)': the model copies the weekday instead of working it out."""
+    d = date.fromisoformat(d) if isinstance(d, str) else d
+    return f"{d.isoformat()} ({WEEKDAYS[d.weekday()]})"
 
 
 @dataclass
@@ -39,6 +56,8 @@ class Fact:
     topic: str
     numbers: list[float] = field(default_factory=list)
     times: list[str] = field(default_factory=list)
+    dates: list[str] = field(default_factory=list)
+    weekdays: list[int] = field(default_factory=list)   # 0 = Monday: of its full dates, and any it names
 
 
 class FactBook:
@@ -47,7 +66,7 @@ class FactBook:
 
     def add(self, topic: str, text: str) -> str:
         fid = f"F{len(self.facts) + 1}"
-        self.facts.append(Fact(fid, text, topic, extract_numbers(text), extract_times(text)))
+        self.facts.append(_fact(fid, text, topic))
         return fid
 
     def by_id(self) -> dict[str, Fact]:
@@ -56,38 +75,151 @@ class FactBook:
     def render(self) -> str:
         return "\n".join(f"[{f.id}] ({f.topic}) {f.text}" for f in self.facts)
 
+    def masked(self, T) -> FactBook:
+        """Same ids and topics with every text passed through T (names -> pseudonyms): what is sent
+        to Claude, and what its answer is checked against."""
+        out = FactBook()
+        out.facts = [_fact(f.id, T(f.text), f.topic) for f in self.facts]
+        return out
 
-_TIME = re.compile(r"\b([01]?\d|2[0-3])[:h]([0-5]\d)\b")
-_NUM = re.compile(r"(?<![\w.,])[-−]?\d+(?:[.,]\d+)?(?![\w])")
+
+def _fact(fid: str, text: str, topic: str) -> Fact:
+    dates = extract_dates(text)
+    days = set(extract_weekdays(text))
+    for d in dates:
+        try:
+            days.add(date.fromisoformat(d).weekday())
+        except ValueError:  # '--10-15' (no year) or an impossible day
+            pass
+    return Fact(fid, text, topic, extract_numbers(text), extract_times(text), dates, sorted(days))
+
+
+# Tokens the gate checks, in this order (each one is blanked out before the next pattern runs):
+#   dates   2026-10-15, 15/10, 15/10/2026, "15 de outubro"   -> must be a date of a cited fact
+#   times   14:32, 9h05, 7h30                                 -> must be a time of a cited fact
+#   hours   14h, 4h (no minutes: a clock hour or a duration)  -> a cited number or a cited time's hour
+#   numbers 2,4  -0,5  25ms  2,8z  90min  15%                 -> a cited number (rounding tolerated)
+#           dois..dez, onze..dezenove, vinte..noventa (e um..nove), cem
+#   weekday quinta, quinta-feira, sábado (bare "segunda" is also an ordinal: not checked)
+#                                                             -> the weekday of a cited date (or named in it)
+# A unit glued to the number ("25ms") does not hide it, and no number is exempt for being small.
+_FID = re.compile(r"\bF\d+\b")                                   # fact ids are not numbers
+_ISO = re.compile(r"(?<![\d-])(\d{4})-(\d{2})-(\d{2})(?!\d)")
+_MONTHS = {"janeiro": 1, "fevereiro": 2, "março": 3, "marco": 3, "abril": 4, "maio": 5, "junho": 6, "julho": 7,
+           "agosto": 8, "setembro": 9, "outubro": 10, "novembro": 11, "dezembro": 12}
+_DMONTH = re.compile(r"(?<![\w.,])(\d{1,2})[º°]?\s+de\s+(" + "|".join(_MONTHS) + r")(?:\s+de\s+(\d{4}))?\b", re.IGNORECASE)
+_DMY = re.compile(r"(?<![\w.,/])(\d{1,2})/(\d{1,2})(?:/(\d{4}|\d{2}))?(?![\d/])")
+_TIME = re.compile(r"(?<![\d.,:])([01]?\d|2[0-3])[:h]([0-5]\d)(?![\d:])")
+_HOUR = re.compile(r"(?<![\w.,:])([01]?\d|2[0-3])h(?!\w)")
+_NUM = re.compile(r"(?<![\w.,])[-−]?\d+(?:[.,]\d+)?(?!\d)")
+_UNITS = {"um": 1, "uma": 1, "dois": 2, "duas": 2, "três": 3, "tres": 3, "quatro": 4, "cinco": 5, "seis": 6,
+          "sete": 7, "oito": 8, "nove": 9}
+_TENS = {"vinte": 20, "trinta": 30, "quarenta": 40, "cinquenta": 50, "cinqüenta": 50, "sessenta": 60,
+         "setenta": 70, "oitenta": 80, "noventa": 90}
+_WORDNUM = {k: v for k, v in _UNITS.items() if v > 1} | {   # "um/uma" alone are also articles: not checked
+    "dez": 10, "onze": 11, "doze": 12, "treze": 13, "catorze": 14, "quatorze": 14, "quinze": 15,
+    "dezesseis": 16, "dezasseis": 16, "dezessete": 17, "dezassete": 17, "dezoito": 18, "dezenove": 19,
+    "dezanove": 19, "cem": 100} | _TENS
+_NUMWORD = re.compile(r"\b(?:(" + "|".join(_TENS) + r")\s+e\s+(" + "|".join(_UNITS) + r")|(" + "|".join(_WORDNUM) + r"))\b",
+                      re.IGNORECASE)                       # "vinte e cinco" is 25, not 20 and 5
+_WEEKDAY = re.compile(r"\b(?:(segunda|terça|terca|quarta|quinta|sexta)s?-feiras?|(terça|terca|quarta|quinta|sexta)s?"
+                      r"(?!\s+(?:vez|vezes|parte)\b)|(sábado|sabado|domingo)s?)\b", re.IGNORECASE)
+_WEEKDAY_N = {"segunda": 0, "terça": 1, "terca": 1, "quarta": 2, "quinta": 3, "sexta": 4, "sábado": 5, "sabado": 5, "domingo": 6}
+
+
+@dataclass
+class _Tok:
+    pos: int
+    kind: str            # date | time | hour | num | weekday
+    value: float | str
+    raw: str
+    nd: int = 0          # decimals written (num)
+    ratio: tuple[float, float] | None = None   # "3/5" may be a ratio rather than a date
+
+
+def _date(y: int | None, m: int, d: int) -> str | None:
+    if not (1 <= m <= 12 and 1 <= d <= 31):
+        return None
+    return f"{y:04d}-{m:02d}-{d:02d}" if y is not None else f"--{m:02d}-{d:02d}"
+
+
+def _scan(text: str) -> list[_Tok]:
+    toks: list[_Tok] = []
+    t = _FID.sub(lambda m: " " * len(m.group(0)), text)
+
+    def take(rx: re.Pattern, make) -> None:
+        nonlocal t
+        out, last = [], 0
+        for m in rx.finditer(t):
+            tok = make(m)
+            if tok is None:
+                continue
+            toks.append(tok)
+            out += [t[last : m.start()], " " * (m.end() - m.start())]
+            last = m.end()
+        t = "".join(out) + t[last:]
+
+    def year(s: str | None) -> int | None:
+        return None if s is None else int(s) + (2000 if len(s) == 2 else 0)
+
+    def iso(m):
+        d = _date(int(m[1]), int(m[2]), int(m[3]))
+        return d and _Tok(m.start(), "date", d, m[0])
+
+    def dmonth(m):
+        d = _date(year(m[3]), _MONTHS[m[2].lower()], int(m[1]))
+        return d and _Tok(m.start(), "date", d, m[0])
+
+    def dmy(m):
+        d = _date(year(m[3]), int(m[2]), int(m[1]))
+        return d and _Tok(m.start(), "date", d, m[0], ratio=None if m[3] else (float(m[1]), float(m[2])))
+
+    take(_ISO, iso)
+    take(_DMONTH, dmonth)
+    take(_DMY, dmy)
+    take(_TIME, lambda m: _Tok(m.start(), "time", f"{int(m[1]):02d}:{m[2]}", m[0]))
+    take(_HOUR, lambda m: _Tok(m.start(), "hour", float(m[1]), m[0]))
+    for m in _NUM.finditer(t):
+        raw = m.group(0)
+        frac = re.split(r"[.,]", raw)
+        toks.append(_Tok(m.start(), "num", float(raw.replace("−", "-").replace(",", ".")), raw,
+                         nd=len(frac[1]) if len(frac) > 1 else 0))
+    for m in _NUMWORD.finditer(t):
+        v = _TENS[m[1].lower()] + _UNITS[m[2].lower()] if m[1] else _WORDNUM[m[3].lower()]
+        toks.append(_Tok(m.start(), "num", float(v), m[0]))
+    for m in _WEEKDAY.finditer(t):
+        toks.append(_Tok(m.start(), "weekday", _WEEKDAY_N[(m[1] or m[2] or m[3]).lower()], m[0]))
+    return sorted(toks, key=lambda k: k.pos)
 
 
 def extract_times(text: str) -> list[str]:
-    return [f"{int(h):02d}:{m}" for h, m in _TIME.findall(text)]
+    return [str(k.value) for k in _scan(text) if k.kind == "time"]
 
 
 def extract_numbers(text: str) -> list[float]:
-    t = _TIME.sub(" ", text)
-    t = re.sub(r"\bF\d+\b", " ", t)               # fact ids are not numbers
-    t = re.sub(r"\b\d{4}-\d{2}-\d{2}\b", " ", t)   # ISO dates handled as tokens, not values
-    out = []
-    for m in _NUM.findall(t):
-        try:
-            out.append(float(m.replace("−", "-").replace(",", ".")))
-        except ValueError:
-            pass
-    return out
+    """Numbers as written, clock-free hours ('22h') included; dates and times are not values."""
+    return [float(k.value) for k in _scan(text) if k.kind in ("num", "hour")]
 
 
-def _matches(x: float, pool: list[float]) -> bool:
+def extract_dates(text: str) -> list[str]:
+    return [str(k.value) for k in _scan(text) if k.kind == "date"]
+
+
+def extract_weekdays(text: str) -> list[int]:
+    return [int(k.value) for k in _scan(text) if k.kind == "weekday"]
+
+
+def _matches(x: float, nd: int, pool: list[float]) -> bool:
+    """x, written with nd decimals, is one of pool rounded to nd decimals (sign-insensitive:
+    "caiu 0,4" for a fact stored as -0,4). An integer never stands for a fact with decimals
+    ("7 h" is not "6,5 h"), and nothing is exempt for being small."""
+    tol = 0.5 * 10.0 ** -nd + 1e-9
     for v in pool:
-        if abs(x - v) <= max(0.051, abs(v) * 0.02):  # one-decimal rounding or 2 %
-            return True
-        if abs(abs(x) - abs(v)) <= 0.051:  # "caiu 0,4" vs a fact stored as -0,4
+        if nd == 0 and abs(v - round(v)) > 1e-9:
+            continue
+        if abs(abs(x) - abs(v)) <= tol:
             return True
     return False
-
-
-SMALL_OK = {0.0, 1.0, 2.0, 3.0, 7.0, 24.0, 30.0, 60.0, 100.0}  # counts/units prose uses freely
 
 
 def gate(text: str, cited: list[str], book: FactBook) -> list[str]:
@@ -98,15 +230,26 @@ def gate(text: str, cited: list[str], book: FactBook) -> list[str]:
         return [f"cita fatos inexistentes: {', '.join(missing)}"]
     nums = [n for c in cited for n in facts[c].numbers]
     times = {t for c in cited for t in facts[c].times}
+    hours = {float(t[:2]) for t in times}
+    dates = {d for c in cited for d in facts[c].dates}
+    weekdays = {w for c in cited for w in facts[c].weekdays}
     probs = []
-    for x in extract_numbers(text):
-        if x in SMALL_OK:
-            continue
-        if not _matches(x, nums):
-            probs.append(f"número {fmt(x, 2)} não está nos fatos citados")
-    for t in extract_times(text):
-        if t not in times:
-            probs.append(f"horário {t} não está nos fatos citados")
+    for k in _scan(text or ""):
+        if k.kind == "num" and not _matches(float(k.value), k.nd, nums):
+            probs.append(f"número {fmt(float(k.value), 2)} não está nos fatos citados")
+        elif k.kind == "hour" and not (k.value in hours or _matches(float(k.value), 0, nums)):
+            probs.append(f"horário {k.raw} não está nos fatos citados")
+        elif k.kind == "time" and k.value not in times:
+            probs.append(f"horário {k.value} não está nos fatos citados")
+        elif k.kind == "date":
+            d = str(k.value)
+            ok = d in dates if not d.startswith("--") else any(x.endswith(d[1:]) for x in dates)
+            if not ok and k.ratio is not None:
+                ok = all(_matches(v, 0, nums) for v in k.ratio)
+            if not ok:
+                probs.append(f"data {k.raw} não está nos fatos citados")
+        elif k.kind == "weekday" and k.value not in weekdays:
+            probs.append(f"dia da semana {k.raw} não corresponde às datas dos fatos citados")
     return probs
 
 
@@ -124,33 +267,44 @@ def build(conn: sqlite3.Connection, start: date, end: date, tz: str) -> FactBook
         day = store.get_artefact(conn, "analysis:day", d.isoformat())
         if day:
             if day.get("arousal_mean_awake") is not None:
-                book.add("dia", f"{d.isoformat()}: ativação média acordado {fmt(day['arousal_mean_awake'], 2)} z; "
+                book.add("dia", f"{day_label(d)}: ativação média acordado {fmt(day['arousal_mean_awake'], 2)} z; "
                                  f"{day['arousal_minutes_above_1_5']} minutos acima de 1,5 z; {len(day['episodes'])} episódios.")
             for ep in day["episodes"]:
                 links = [titles.get(i) or i for i in ep.get("overlaps", [])]
-                book.add("episódio", f"{d.isoformat()} episódio {ep['kind']} das {hhmm(ep['start_ms'], tz)} às {hhmm(ep['end_ms'], tz)}, "
+                book.add("episódio", f"{day_label(d)} episódio {ep['kind']} das {hhmm(ep['start_ms'], tz)} às {hhmm(ep['end_ms'], tz)}, "
                                      f"pico {fmt(ep['peak_z'], 1)} z às {hhmm(ep['peak_ms'], tz)}, área {fmt(ep['auc_z_min'], 1)} z·min"
                                      + (f"; coincide com: {', '.join(str(x) for x in links)}" if links else "; sem evento na agenda"))
         night = store.get_artefact(conn, "sleep:night", d.isoformat())
         if night:
-            book.add("sono", f"noite que terminou em {d.isoformat()}: {fmt(night['total_sleep_min'] / 60, 1)} h de sono, "
-                             f"eficiência {fmt((night.get('efficiency') or 0) * 100, 0)} %, profundo {fmt(night.get('deep_min'), 0)} min, "
-                             f"REM {fmt(night.get('rem_min'), 0)} min, {night.get('awakenings', 0)} despertares, "
-                             f"FC mínima {fmt(night.get('hr_nadir'), 0)} bpm a {fmt((night.get('hr_nadir_at_frac') or 0) * 100, 0)} % da noite, "
-                             f"débito acumulado {fmt(night.get('debt_min'), 0)} min, HRV {fmt(night.get('hrv_ms'), 0)} ms ({night.get('hrv_status')}).")
+            # a value the night does not have is left out, never written as 0 (it would become a "verified" number)
+            eff, nadir_at = pct(night.get("efficiency")), pct(night.get("hr_nadir_at_frac"))
+            book.add("sono", f"noite que terminou em {day_label(d)}: {fmt(night['total_sleep_min'] / 60, 1)} h de sono, "
+                             + (f"eficiência {fmt(eff, 0)} %, " if eff is not None else "")
+                             + f"profundo {fmt(night.get('deep_min'), 0)} min, "
+                             f"REM {fmt(night.get('rem_min'), 0)} min, {fmt(night.get('awakenings'), 0)} despertares, "
+                             f"FC mínima {fmt(night.get('hr_nadir'), 0)} bpm"
+                             + (f" a {fmt(nadir_at, 0)} % da noite" if nadir_at is not None else "")
+                             + f", débito acumulado {fmt(night.get('debt_min'), 0)} min, HRV {fmt(night.get('hrv_ms'), 0)} ms ({night.get('hrv_status')}).")
         d += timedelta(days=1)
 
-    for r in conn.execute("SELECT key, body FROM artefacts WHERE kind = 'meeting_response'"):
-        import json
+    # the meeting analysis for exactly this range, computed now: the scheduler stores other ranges (last
+    # 3 days), and a stored one may predate meetings or data that arrived since (a mid-day `fatos` must
+    # not stand for the whole day). It also refreshes the per-meeting responses read just below.
+    summ = None
+    if conn.execute("SELECT 1 FROM events WHERE kind IN ('meeting', 'calendar') AND start_ms >= ? AND start_ms < ? LIMIT 1",
+                    (a, b)).fetchone():
+        from pulso import jobs
 
+        summ = jobs.meeting_job(conn, start, end, tz)
+
+    for r in conn.execute("SELECT key, body FROM artefacts WHERE kind = 'meeting_response'"):
         m = json.loads(r["body"])
         if not (a <= m["start_ms"] < b):
             continue
         rec = f"recuperou em {fmt(m['recovery_min'], 0)} min" if m.get("recovery_min") is not None else "não voltou ao basal em 60 min"
-        book.add("reunião", f"reunião \"{m.get('title') or '?'}\" ({m['day']} {hhmm(m['start_ms'], tz)}): antecipação {fmt(m.get('anticipation'), 2)} z, "
+        book.add("reunião", f"reunião \"{m.get('title') or '?'}\" em {day_label(m['day'])} às {hhmm(m['start_ms'], tz)}: antecipação {fmt(m.get('anticipation'), 2)} z, "
                             f"durante {fmt(m.get('during'), 2)} z, pico {fmt(m.get('peak'), 2)} z, {rec}.")
 
-    summ = store.get_artefact(conn, "meetings:summary", f"{start.isoformat()}..{end.isoformat()}")
     if summ:
         vc = summ["vs_matched_controls"]
         if vc.get("mean_dz") is not None:
@@ -184,4 +338,7 @@ def build(conn: sqlite3.Connection, start: date, end: date, tz: str) -> FactBook
     if commits:
         late = sum(1 for c in commits if int(hhmm(c["start_ms"], tz)[:2]) >= 22 or int(hhmm(c["start_ms"], tz)[:2]) < 5)
         book.add("código", f"{len(commits)} commits no período, {late} entre 22h e 5h.")
+    if book.facts:  # lets "nos 7 dias" and the period's dates be cited like any other number
+        n = (end - start).days + 1
+        book.add("período", f"período do relatório: {start.isoformat()} a {end.isoformat()} ({n} {'dia' if n == 1 else 'dias'}).")
     return book

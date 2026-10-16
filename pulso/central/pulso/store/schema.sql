@@ -86,11 +86,14 @@ CREATE TABLE IF NOT EXISTS sleep_epochs (
 ) WITHOUT ROWID;
 
 -- Device tokens: only the SHA-256 of the bearer token is stored.
+-- scope: 'device' (watch/bridge: upload + face state) | 'painel' (dashboard: read-only history).
+-- Databases created before v2 get the column from store.db._migrate.
 CREATE TABLE IF NOT EXISTS device_tokens (
     token_sha256  TEXT    PRIMARY KEY,
     label         TEXT    NOT NULL,
     created_ms    INTEGER NOT NULL,
-    revoked_ms    INTEGER
+    revoked_ms    INTEGER,
+    scope         TEXT    NOT NULL DEFAULT 'device'
 );
 
 -- Idempotency for uploads coming from the watch / bridge (retries must not double-count).

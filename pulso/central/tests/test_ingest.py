@@ -99,7 +99,7 @@ def test_painel_endpoints():
 
     conn = store.connect(":memory:")
     _fill_days(conn, date(2026, 9, 20), 16, date(2026, 10, 5))
-    tok = auth.create_token(conn, "web")
+    tok = auth.create_token(conn, "web", scope=auth.PAINEL)
     c = TestClient(create_app(config.Settings(tz=TZ), conn=conn))
     page = c.get("/painel")
     assert page.status_code == 200 and "Pulso" in page.text and tok not in page.text
@@ -110,3 +110,19 @@ def test_painel_endpoints():
     assert any(e["kind"] == "meeting" for e in d["events"]) and d["episodes"]
     t = c.get("/v1/painel/tabela?dias=3", headers=h).json()
     assert len(t["rows"]) == 3
+
+
+def test_capture_stop_and_next_start_in_same_second_both_kept(client_and_token):
+    # Capture.setMode: stop(SWITCH) seals batch q with the stop event, start(m) opens batch q+1 with
+    # the start event in the same second, both at index 0 of their batch
+    c, tok, conn = client_and_token
+    h = {"Authorization": f"Bearer {tok}"}
+    t = 1_760_630_400
+    stop = {"v": 1, "d": "fr255-cap-x", "q": 10, "src": "cap", "sid": "c-1", "ev": [[t, "cap", "stop:switch rr=812 ok=1"]]}
+    start = {"v": 1, "d": "fr255-cap-x", "q": 11, "src": "cap", "sid": "c-2", "ev": [[t, "cap", "start:treino"]]}
+    assert c.post("/v1/ingest", json=stop, headers=h).status_code == 200
+    assert c.post("/v1/ingest", json=start, headers=h).status_code == 200
+    # the same batch again (lost ack, or also sent over BLE): still idempotent
+    assert c.post("/v1/ingest", json=stop, headers=h).json()["dup"] == 1
+    titles = sorted(e.title for e in store.events(conn, 0, 2**62, kinds=["note"]))
+    assert titles == ["start:treino", "stop:switch rr=812 ok=1"]

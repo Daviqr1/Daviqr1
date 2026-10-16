@@ -59,8 +59,10 @@
 </header>
 <main>
   <section class="card" id="login">
-    <h2>Token do aparelho</h2>
-    <p class="muted">Cole um token gerado com <code>pulso token create</code>. Ele fica só neste navegador.</p>
+    <h2>Token do painel</h2>
+    <p class="muted">Cole um token gerado com <code>pulso token create painel --painel</code>. Ele fica só neste navegador.
+      O token do relógio não abre o painel.</p>
+    <p class="muted" id="loginmsg"></p>
     <input id="tok" type="password" style="width:100%" placeholder="pulso_dev_...">
     <p><button id="save">Entrar</button></p>
   </section>
@@ -110,7 +112,13 @@
 
   async function api(path) {
     const r = await fetch(path, { headers: { Authorization: "Bearer " + token } });
-    if (r.status === 401) { showLogin(); throw new Error("401"); }
+    if (r.status === 401 || r.status === 403) {
+      $("loginmsg").textContent = r.status === 403
+        ? "Este é um token de aparelho (relógio). Crie um token do painel com: pulso token create painel --painel"
+        : "Token inválido ou revogado.";
+      showLogin();
+      throw new Error(String(r.status));
+    }
     return r.json();
   }
   function showLogin() { $("login").style.display = "block"; }

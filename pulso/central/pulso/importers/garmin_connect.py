@@ -150,11 +150,17 @@ def parse_sleep(js: dict) -> tuple[list[tuple[int, int, str]], list[Event]]:
     return epochs, evs
 
 
+class GarminLoginError(RuntimeError):
+    """No usable Garmin Connect client: the `garmin` extra is missing or the login failed without
+    credentials to retry with. A plain exception, never SystemExit: the daemon's sync job must fail
+    and be logged, not stop the process (the CLI turns it into a message)."""
+
+
 def _client():
     try:
         from garminconnect import Garmin
     except ImportError as e:  # pragma: no cover
-        raise SystemExit("pip install 'pulso[garmin]' para sincronizar com o Garmin Connect") from e
+        raise GarminLoginError("pip install 'pulso[garmin]' para sincronizar com o Garmin Connect") from e
     tokens = os.environ.get("PULSO_GARMIN_TOKENS", str(Path.home() / ".garminconnect"))
     email, pw = os.environ.get("GARMIN_EMAIL"), os.environ.get("GARMIN_PASSWORD")
     g = Garmin(email, pw, prompt_mfa=lambda: input("código MFA da Garmin: "))
@@ -162,7 +168,8 @@ def _client():
         g.login(tokens)  # loads saved tokens, or logs in with the credentials and saves them
     except Exception as e:
         if not (email and pw):
-            raise SystemExit("defina GARMIN_EMAIL e GARMIN_PASSWORD no primeiro login (os tokens ficam salvos depois)") from e
+            raise GarminLoginError("login no Garmin Connect falhou com os tokens salvos; se expiraram, defina "
+                                   f"GARMIN_EMAIL e GARMIN_PASSWORD (os tokens ficam salvos depois): {e!r}"[:300]) from e
         raise
     return g
 
@@ -207,8 +214,9 @@ COLD_AFTER_DAYS = 170  # Garmin moves intraday data older than ~6 months to cold
 def sync(conn: sqlite3.Connection, days: int = 7, tz: str | None = None, client=None, since: date | None = None,
          until: date | None = None, pause_s: float = 2.0, resume: bool = True, reload_cold: bool = False,
          max_reloads: int = 20, log=print) -> dict:
-    """Sync day by day, newest first. Built for backfills: resumable (days already synced are
-    skipped, except the last 2 which may still be filling in), throttled (`pause_s` between days,
+    """Sync day by day, newest first. Built for backfills: resumable (days already synced complete
+    are skipped; the last 2 may still be filling in, so they are always fetched and only marked
+    synced by a run that finds them complete), throttled (`pause_s` between days,
     be gentle with an unofficial endpoint) and aware of cold storage (older intraday data comes
     back empty; with `reload_cold` a reload is requested — at most `max_reloads` per run — and the
     day is fetched again on a later run)."""
@@ -277,7 +285,7 @@ def sync(conn: sqlite3.Connection, days: int = 7, tz: str | None = None, client=
                 problems.append(f"reload: {e!r}"[:200])
         elif cold:
             problems.append("armazenamento frio (>6 meses): use o export da conta ou --reload-cold")
-        if not cold:
+        if not cold and not fresh:  # a day still filling in is fetched again once it is complete
             store.put_artefact(conn, "gc_synced", ds, {"stored": stored, "problems": problems})
         report[ds] = {"stored": stored, "problems": problems}
         log(f"{ds}: {sum(v for v in stored.values() if isinstance(v, int))} itens"
