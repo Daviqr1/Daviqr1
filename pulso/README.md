@@ -63,6 +63,7 @@ ou túnel Cloudflare/Tailscale).
 - [Ciência](docs/ciencia.md)
 - [Protocolo relógio ↔ central](docs/protocolo.md)
 - [Ponte BLE e cinta](docs/ponte-ble.md)
+- [Central no notebook (e por onde cada pacote vai)](docs/notebook.md)
 - [Deploy e Claude/MCP](docs/deploy.md)
 - [Privacidade](docs/privacidade.md)
 

@@ -52,7 +52,14 @@ def loop(settings: config.Settings | None = None, once: bool = False) -> None:
         stamp = today.isoformat()
 
         if due("today", 300):
-            _run(conn, "analyze:today", lambda: analysis.analyze_day(conn, today, settings.tz).summary()["minutes_with_hr"])
+            def _today():
+                from pulso import alerts
+
+                n = analysis.analyze_day(conn, today, settings.tz).summary()["minutes_with_hr"]
+                fired = alerts.evaluate(conn, int(time.time() * 1000), settings.tz)
+                return f"{n} min com FC; alertas: {[a.kind for a in fired]}"
+
+            _run(conn, "analyze:today", _today)
 
         if due("garmin", 6 * 3600) and (os.environ.get("GARMIN_EMAIL") or os.path.exists(
                 os.environ.get("PULSO_GARMIN_TOKENS", os.path.expanduser("~/.garminconnect")))):
