@@ -7,7 +7,7 @@ name = "pulso"
 version = "0.1.0"
 description = "Central de saúde e performance: ingere dados brutos do Garmin FR255, cruza com reuniões/agenda/código e explica de onde vem o estresse."
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
     "numpy>=2.0",
     "scipy>=1.13",
