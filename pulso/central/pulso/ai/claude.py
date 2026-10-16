@@ -17,6 +17,8 @@ from typing import Any
 from pulso import config
 
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
+# models that accept server-side refusal fallbacks (Haiku 5.5 does not: no fallback exists for it)
+FALLBACK_MODELS = ("claude-opus-5-5", "claude-opus-5", "claude-fable-5-1", "claude-sonnet-5-5")
 
 
 class ClaudeUnavailable(RuntimeError):
@@ -55,17 +57,19 @@ def structured(system: str, user: str, schema: dict[str, Any], *, model: str | N
     settings = settings or config.get()
     client = client or _client()
     model = model or settings.report_model
+    params: dict[str, Any] = dict(
+        model=model,
+        max_tokens=max_tokens,
+        cache_control={"type": "ephemeral"},
+        system=system,
+        output_config={"effort": effort, "format": {"type": "json_schema", "schema": schema}},
+        messages=[{"role": "user", "content": user}],
+    )
     try:
-        resp = client.beta.messages.create(
-            model=model,
-            max_tokens=max_tokens,
-            betas=[FALLBACK_BETA],
-            fallbacks="default",
-            cache_control={"type": "ephemeral"},
-            system=system,
-            output_config={"effort": effort, "format": {"type": "json_schema", "schema": schema}},
-            messages=[{"role": "user", "content": user}],
-        )
+        if model in FALLBACK_MODELS:
+            resp = client.beta.messages.create(betas=[FALLBACK_BETA], fallbacks="default", **params)
+        else:
+            resp = client.messages.create(**params)
     except anthropic.AuthenticationError as e:
         raise ClaudeUnavailable("credencial do Claude inválida ou ausente (ANTHROPIC_API_KEY / ant auth login)") from e
     except anthropic.APIConnectionError as e:
@@ -76,6 +80,7 @@ def structured(system: str, user: str, schema: dict[str, Any], *, model: str | N
         raise ClaudeRefused(getattr(sd, "category", None), getattr(sd, "explanation", None))
     if resp.stop_reason == "max_tokens":
         raise RuntimeError("resposta cortada em max_tokens; aumente max_tokens ou reduza a entrada")
+    # content may start with (empty) thinking blocks: pick the text block by type
     text = next((b.text for b in resp.content if getattr(b, "type", None) == "text"), None)
     if text is None:
         raise RuntimeError("resposta sem bloco de texto")

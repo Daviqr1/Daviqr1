@@ -221,9 +221,20 @@ def run(conn: sqlite3.Connection, tz: str, http: bool = False, host: str = "127.
         return
     if not settings.mcp_token:
         raise SystemExit("defina PULSO_MCP_TOKEN para expor o MCP por HTTP")
-    import uvicorn
+    import os
 
-    app = server.streamable_http_app(host=host)
+    import uvicorn
+    from mcp.server.transport_security import TransportSecuritySettings
+
+    # MCP 2.x protects against DNS rebinding: behind a public hostname (Caddy, tunnel) the Host
+    # header must be allow-listed, e.g. PULSO_MCP_ALLOWED_HOSTS="pulso.seudominio.dev"
+    extra = [h.strip() for h in os.environ.get("PULSO_MCP_ALLOWED_HOSTS", os.environ.get("PULSO_DOMAIN", "")).split(",") if h.strip()]
+    security = None
+    if extra:
+        hosts = extra + [f"{h}:*" for h in extra] + ["127.0.0.1:*", "localhost:*"]
+        security = TransportSecuritySettings(enable_dns_rebinding_protection=True, allowed_hosts=hosts,
+                                             allowed_origins=[f"https://{h}" for h in extra])
+    app = server.streamable_http_app(host=host, transport_security=security)
     uvicorn.run(BearerGate(app, settings.mcp_token), host=host, port=port)
 
 

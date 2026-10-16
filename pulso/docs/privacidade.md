@@ -26,9 +26,14 @@ opiniões de **outras pessoas**. O Pulso foi desenhado para que isso fique sob o
 1. **Combine com o time** antes de etiquetar transcrições de reuniões com outras pessoas, ou limite
    o `pulso tag` às reuniões em que isso foi acordado. Gravar e transcrever já pede consentimento;
    processar com IA externa é mais um passo.
-2. Para a API do Claude, verifique as configurações de retenção da sua organização na Anthropic
-   Console (há opções de retenção reduzida/zero para contas elegíveis).
-3. Use disco criptografado no servidor e backup criptografado.
-4. A biblioteca do Garmin Connect guarda tokens da sua conta em `~/.garminconnect` — trate como senha.
-5. Os resultados são **para você** entender padrões, não diagnóstico. Sinais persistentes (palpitação,
+2. **API do Claude (relatório, tagger)**: pela política comercial, entradas e saídas são apagadas em até
+   30 dias e não treinam modelos sem permissão; conteúdo sinalizado por moderação pode ficar até 2 anos.
+   Retenção zero (ZDR) é contrato via vendas e **não** cobre a Batches API (guarda 29 dias). Por isso o
+   Pulso usa chamadas síncronas. O Opus 5.5 não é “Covered Model” (que exige 30 dias).
+3. **Conversas no app do Claude usando o MCP**: o resultado das ferramentas vira conteúdo da conversa e
+   segue a política de consumidor da sua conta — desligue o uso para treino nas configurações (ou use o
+   modo anônimo) antes de consultar dados de saúde e de reunião.
+4. Use disco criptografado no servidor e backup criptografado.
+5. A biblioteca do Garmin Connect guarda tokens da sua conta em `~/.garminconnect` — trate como senha.
+6. Os resultados são **para você** entender padrões, não diagnóstico. Sinais persistentes (palpitação,
    insônia crônica, estresse incapacitante) são assunto para médico.

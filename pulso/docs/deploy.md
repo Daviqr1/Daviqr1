@@ -57,6 +57,11 @@ pulso report --days 7 --kind weekly
 
 ## Claude
 
+Modelos: relatório e etiquetagem usam `claude-opus-5-5` (relatório com esforço `high`/`xhigh`, etiquetagem
+com `low`), com fallback de recusa no servidor ligado. Para baratear a etiquetagem em volume, dá para usar
+`PULSO_TAGGER_MODEL=claude-haiku-5-5` (bem mais barato; sem fallback de recusa — trechos recusados ficam sem
+etiqueta). A credencial vem de `ANTHROPIC_API_KEY` ou de um perfil `ant auth login`.
+
 - **Claude Desktop / Claude Code (local)**: MCP em stdio.
 
   ```json
@@ -65,9 +70,13 @@ pulso report --days 7 --kind weekly
 
   Claude Code: `claude mcp add pulso -- pulso mcp`.
 - **Claude Code remoto**: `claude mcp add --transport http pulso https://SEU_DOMINIO/mcp --header "Authorization: Bearer $PULSO_MCP_TOKEN"`.
-- **claude.ai (conector personalizado)** exige OAuth no servidor MCP remoto; o Bearer estático deste
-  projeto não basta. Para o app web, use o Claude Desktop/Code ou adicione OAuth (o SDK MCP 2.x tem
-  `auth_server_provider`/`token_verifier` em `MCPServer`).
+  Atrás de domínio público, o MCP 2.x exige o host na lista de permitidos (proteção contra DNS rebinding):
+  o compose já passa `PULSO_DOMAIN`; fora dele, defina `PULSO_MCP_ALLOWED_HOSTS=seu.dominio`.
+- **claude.ai (conector personalizado)**: o servidor precisa ser HTTPS público e usar OAuth com registro
+  dinâmico de cliente (DCR) ou CIMD — ou ser sem autenticação, o que não faz sentido para dado de saúde.
+  Cabeçalho estático está em beta só para algumas organizações (veja se aparece no seu “Add custom
+  connector”). O Bearer deste projeto serve para Claude Code/Desktop; para o app web, o próximo passo é
+  ligar o servidor de autorização embutido do SDK (`auth_server_provider` + `AuthSettings` em `MCPServer`).
 
 ## Backup
 
