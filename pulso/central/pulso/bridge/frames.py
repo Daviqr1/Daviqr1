@@ -17,19 +17,45 @@ Types (dt = ms since the last SYNC, u24 -> up to 4.6 h; the watch re-syncs every
     0x05 HR         dt u24 | bpm u8                                            (4 B)
     0x06 MARK       dt u24 | code u8   (1 estresse, 2 café, 3 reunião começou, 4 reunião acabou)
     0x07 BAT        pct u8 | drain_x10 u8 (%/h * 10)
+    0x08 BLOB_START q u32                       (a protocol-v1 JSON batch follows)
+    0x09 BLOB_DATA  up to 18 bytes of the JSON
+    0x0A BLOB_END   total u16 | mac[16]         (HMAC-SHA256(key, json)[:16], key = SHA-256(device token))
 
-Peripheral -> watch notification (ctrl characteristic): last_seq u8 | accel_hz_hint u8.
-A delta beyond ±127 mG forces a new ACC_KEY, so decoding never accumulates error.
+Peripheral -> watch notification (ctrl characteristic): last_seq u8 | accel_hz_hint u8, and after a
+blob also 0xB1 | q u32 | status u8 (0 stored, 1 rejected, 2 bad MAC, 3 retry).
+A delta beyond ±127 mG forces a new ACC_KEY, so decoding never accumulates error. The watch writes
+the seq at transmission time, so a gap means frames lost on the air: the decoder then waits for the
+next ACC_KEY and aborts a blob in progress (the watch re-sends the whole batch, same q).
 """
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import struct
 from dataclasses import dataclass, field
 
-SYNC, RR, ACC_KEY, ACC_DELTA, FEAT, HR, MARK, BAT = range(8)
+SYNC, RR, ACC_KEY, ACC_DELTA, FEAT, HR, MARK, BAT, BLOB_START, BLOB_DATA, BLOB_END = range(11)
 MAX_FRAME = 20
+MAC_LEN = 16
+BLOB_ACK = 0xB1
+BLOB_OK, BLOB_REJECTED, BLOB_BAD_MAC, BLOB_RETRY = range(4)
+MAX_BLOB = 65535
 MARK_LABELS = {1: "estresse", 2: "café", 3: "reunião começou", 4: "reunião acabou"}
+
+
+def blob_key(token: str) -> bytes:
+    """MAC key shared by the watch and the bridge: SHA-256 of the device token. The central
+    stores exactly this digest (hex) for every token, so a local bridge needs no secret of its own."""
+    return hashlib.sha256(token.strip().encode()).digest()
+
+
+def blob_mac(key: bytes, payload: bytes) -> bytes:
+    return hmac.new(key, payload, hashlib.sha256).digest()[:MAC_LEN]
+
+
+def blob_ack(last_seq: int, hint: int, q: int, status: int) -> bytes:
+    return bytes((last_seq & 0xFF, hint & 0xFF, BLOB_ACK)) + struct.pack("<I", q & 0xFFFFFFFF) + bytes((status,))
 
 
 def _u24(b: bytes) -> int:
@@ -118,6 +144,14 @@ class Encoder:
     def bat(self, pct: int, drain_x10: int) -> bytes:
         return self._frame(BAT, bytes((max(0, min(100, pct)), max(0, min(255, drain_x10)))))
 
+    def blob(self, q: int, payload: bytes, key: bytes) -> list[bytes]:
+        if len(payload) > MAX_BLOB:
+            raise ValueError("blob too large")
+        out = [self._frame(BLOB_START, struct.pack("<I", q))]
+        out += [self._frame(BLOB_DATA, payload[i : i + 18]) for i in range(0, len(payload), 18)]
+        out.append(self._frame(BLOB_END, struct.pack("<H", len(payload)) + blob_mac(key, payload)))
+        return out
+
 
 # ------------------------------------------------------------------------------ decoding
 
@@ -133,6 +167,8 @@ class Decoded:
     lost_frames: int = 0
     bad_frames: int = 0
     session: int | None = None
+    blobs: list[tuple[int, bytes, bytes, int]] = field(default_factory=list)   # (q, payload, mac, total)
+    blobs_failed: list[int] = field(default_factory=list)                     # q to re-send
 
     def empty(self) -> bool:
         return not (self.rr or self.accel or self.feat or self.hr or self.marks or self.battery)
@@ -148,11 +184,25 @@ class Decoder:
         self.acc_prev: tuple[int, int, int] | None = None
         self.acc_t: float | None = None     # ms timestamp of acc_prev
         self.acc_hz: float = 25.0
+        self.blob_q: int | None = None
+        self.blob_buf = bytearray()
         self.out = Decoded()
 
     def take(self) -> Decoded:
         d, self.out = self.out, Decoded(session=self.session)
         return d
+
+    def take_blobs(self) -> tuple[list[tuple[int, bytes, bytes, int]], list[int]]:
+        """Completed and failed blobs only (the stream part keeps accumulating)."""
+        done, failed = self.out.blobs, self.out.blobs_failed
+        self.out.blobs, self.out.blobs_failed = [], []
+        return done, failed
+
+    def _abort_blob(self) -> None:
+        if self.blob_q is not None:
+            self.out.blobs_failed.append(self.blob_q)
+        self.blob_q = None
+        self.blob_buf = bytearray()
 
     def feed(self, frame: bytes) -> None:
         if len(frame) < 2 or len(frame) > MAX_FRAME:
@@ -163,8 +213,9 @@ class Decoder:
             gap = (seq - self.last_seq - 1) & 0xFF
             if gap:
                 self.out.lost_frames += gap
-                if typ == ACC_DELTA:   # cannot apply deltas after a loss: wait for the next key
-                    self.acc_prev = None
+                # whatever was lost may have been a delta or part of a blob: never guess
+                self.acc_prev = None
+                self._abort_blob()
         self.last_seq = seq
         try:
             self._dispatch(typ, p)
@@ -217,6 +268,25 @@ class Decoder:
             self.out.marks.append((self._t(_u24(p[0:3])), MARK_LABELS.get(p[3], f"marca_{p[3]}")))
         elif typ == BAT:
             self.out.battery = (p[0], p[1] / 10.0)
+        elif typ == BLOB_START:
+            self._abort_blob()   # an unfinished previous blob is incomplete by definition
+            (self.blob_q,) = struct.unpack("<I", p[:4])
+        elif typ == BLOB_DATA:
+            if self.blob_q is not None:
+                self.blob_buf += p
+                if len(self.blob_buf) > MAX_BLOB:
+                    self._abort_blob()
+        elif typ == BLOB_END:
+            if self.blob_q is None:
+                return
+            (total,) = struct.unpack("<H", p[:2])
+            mac = bytes(p[2 : 2 + MAC_LEN])
+            if len(mac) != MAC_LEN or total != len(self.blob_buf):
+                self._abort_blob()
+                return
+            self.out.blobs.append((self.blob_q, bytes(self.blob_buf), mac, total))
+            self.blob_q = None
+            self.blob_buf = bytearray()
         else:
             raise ValueError(f"unknown type {typ}")
 

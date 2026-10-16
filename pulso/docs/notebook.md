@@ -11,7 +11,7 @@ Ele sobe, no mesmo processo:
 | Peça | Para quê |
 |---|---|
 | API de ingestão + painel (`localhost:8080`) | recebe o mostrador e o app pelo celular; painel em `/painel` |
-| Jobs | reanálise a cada 5 min, alertas, Garmin Connect a cada 6 h, sono/reuniões às 04:30, relatório às 07:00, resumo às 07:15 |
+| Jobs | reanálise a cada 5 min, alertas, Garmin Connect a cada 6 h, sono/reuniões às 04:30, relatório às 06:30, resumo às 06:45 e a cada 2 h |
 | Ponte BLE (`--ble`) | o relógio manda direto para o notebook, sem celular |
 | Túnel (`--tunnel`) | HTTPS público para o celular alcançar o notebook |
 
@@ -26,8 +26,8 @@ O roteamento é por tamanho e por quem está por perto:
 | Pacote | Tamanho | Caminho |
 |---|---|---|
 | Mostrador: histórico do relógio, estresse, passos, bateria (a cada 5 min) | ≤ 3 KB | celular → túnel → notebook |
-| App de captura: RR + features de movimento + FC 1 Hz | ≤ 6 KB por lote | celular, ou BLE quando o notebook está perto |
-| App de captura: acelerômetro bruto, sessões longas | grande | **BLE para o notebook**; se o notebook não estiver por perto, fica na fila do relógio (limitada) e o bruto completo vai no FIT da sessão |
+| App de captura: RR + features de movimento + FC 1 Hz + histórico | ≤ 6 KB por lote | celular; **BLE** (lote assinado) quando o celular não está conectado ou o lote passou de 6 KB |
+| App de captura: acelerômetro bruto ao vivo | ~150 B/s | **só BLE para o notebook**; ~40 s de fila no relógio; sem a ponte, o bruto completo vai no FIT (TREINO/MAX) e no resto fica só a feature por segundo |
 | FIT do relógio (monitoramento, sono, HRV, atividades) | MB | USB (MTP) ou zip diário do Garmin Connect |
 
 É o mesmo caminho pelo celular que você já usa na tela do limite do Claude (o `makeWebRequest` passa pelo

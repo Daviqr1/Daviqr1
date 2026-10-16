@@ -9,6 +9,7 @@
     <string id="MMark">Marcar evento</string>
     <string id="MFit">Gravar FIT (TREINO)</string>
     <string id="MSend">Enviar agora</string>
+    <string id="MBle">Ponte BLE (notebook)</string>
     <string id="MModeTitle">Modo de captura</string>
     <string id="MMarkTitle">Marcar</string>
 
@@ -67,4 +68,6 @@
     <string id="SFloorTitle">Bateria mínima para capturar (%)</string>
     <string id="SFloorError">Use um valor entre 5 e 50</string>
     <string id="SFitTitle">Gravar FIT no TREINO</string>
+    <string id="SBleTitle">Ponte BLE com o notebook</string>
+    <string id="SBleRespTitle">Ponte BLE: escrita com confirmação</string>
 </strings>

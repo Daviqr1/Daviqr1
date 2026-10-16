@@ -34,5 +34,6 @@
     <string id="RingCentral">Só ativação da central</string>
     <string id="RingGarmin">Só estresse Garmin</string>
     <string id="SetSaverTitle">Economia automática de bateria</string>
+    <string id="SetAlertTitle">Notificar alertas da central</string>
     <string id="SetDeviceIdTitle">ID deste relógio</string>
 </strings>

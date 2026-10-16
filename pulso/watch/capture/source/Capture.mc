@@ -39,6 +39,7 @@ class Capture {
     var builder as BatchBuilder;
     var queue as UploadQueue;
     var uploader as Uploader;
+    var ble as BleLink;
     var gov as Governor;
     var fit as FitRecorder;
 
@@ -72,6 +73,7 @@ class Capture {
     private var _booted as Boolean = false;
     private var _histCursor as Dictionary<String, Number>;
     private var _histDirty as Boolean = false;   // cursor advanced in memory, batch not sealed yet
+    private var _bleWasReady as Boolean = false;
 
     function initialize() {
         clock = new Clock();
@@ -79,7 +81,8 @@ class Capture {
         feat = new AccelFeatures();
         builder = new BatchBuilder();
         queue = new UploadQueue();
-        uploader = new Uploader(queue);
+        ble = new BleLink(clock);
+        uploader = new Uploader(queue, ble);
         gov = new Governor();
         fit = new FitRecorder();
         mode = Cfg.defaultMode();
@@ -88,6 +91,18 @@ class Capture {
         probeRates();
         _timer = new Timer.Timer();
         _timer.start(method(:onTick), 1000, true);
+        if (Cfg.bleBridge()) {
+            ble.enable();
+        }
+    }
+
+    //! Ponte BLE on/off (menu or settings).
+    function setBridge(on as Boolean) as Void {
+        if (on) {
+            ble.enable();
+        } else {
+            ble.disable();
+        }
     }
 
     // ---- lifecycle --------------------------------------------------------------------------
@@ -115,6 +130,7 @@ class Capture {
         hr = null;
         capturing = true;
         startS = nowS;
+        ble.setSession(nowS);
         _lastFlushS = nowS;
         _lastBarS = 0;
         _lastDfaS = nowS;
@@ -151,6 +167,7 @@ class Capture {
             + (fitWasOn ? " fit=1" : ""));
         sealNow();
         capturing = false;
+        ble.setSession(0);
         sid = null;
         builder.sid = null;
         hr = null;
@@ -186,6 +203,7 @@ class Capture {
         stop(Stop.APP);
         sealNow();
         _timer.stop();
+        ble.disable();
     }
 
     function onSettingsChanged() as Void {
@@ -195,6 +213,7 @@ class Capture {
             gov.budget = Cfg.budget(mode);
             gov.floor = Cfg.floorPct();
         }
+        setBridge(Cfg.bleBridge());
         uploader.request(true);
     }
 
@@ -410,6 +429,8 @@ class Capture {
                 if (z.size() < n) {
                     n = z.size();
                 }
+                // raw samples straight to the laptop when the BLE bridge is up (too big for the phone)
+                ble.pushAccel(tMs - (period * 1000).toLong(), x, y, z, n, period);
                 // the callback covers `period` seconds (API reference); one window per second
                 var w = period;
                 accSeen = n / w;
@@ -461,6 +482,13 @@ class Capture {
         if (capturing) {
             tickCapture(nowS);
         }
+        var d = gov.drain;
+        ble.tick(nowS, gov.battery.toNumber(), (d != null) ? (d * 10.0).toNumber() : 0);
+        var bleReady = ble.ready();
+        if (bleReady && !_bleWasReady) {
+            uploader.request(true);   // the bridge just came up: queued batches can go now
+        }
+        _bleWasReady = bleReady;
         uploader.tick(nowS);
 
         var sono = capturing && mode == Cfg.MODE_SONO;

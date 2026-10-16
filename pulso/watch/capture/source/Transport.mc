@@ -75,30 +75,39 @@ class HttpCall {
     }
 }
 
-//! Direct BLE link to the Pulso bridge (laptop/ESP32), for raw accelerometer at full rate.
-//! TODO(docs/ponte-ble.md): implement with Toybox.BluetoothLowEnergy (watch = central):
-//! scan for service 6c1e0001-5b7a-4d6e-9f2a-50554c534f31, write <= 20-byte frames to DATA
-//! (6c1e0002-...) one operation at a time, read acks/suggested accel rate from CTRL
-//! (6c1e0003-..., notify). Frame layout and the reference codec: central/pulso/bridge/frames.py.
-//! MARK codes there are 1..4 = Capture.MARKS[0..3]; "pausa" (index 4) needs code 5 added.
-//! Needs the BluetoothLowEnergy permission and a "Ponte BLE" mode. This transport carries the
-//! live stream, not the queued JSON batches; until it exists it reports unavailable and the
-//! uploader never selects it.
+//! An upload-queue batch over the BLE bridge (BleLink): JSON bytes + HMAC, acknowledged by the
+//! bridge only once stored. Used by the uploader's router when the phone is away or the batch is
+//! too big for the phone route.
 class BleTransport extends Transport {
-    function initialize() {
+    private var _link as BleLink;
+
+    function initialize(link as BleLink) {
         Transport.initialize();
+        _link = link;
     }
 
     function name() as String {
         return "ble";
     }
 
+    //! The bridge needs the device token to check the signature (HMAC key = SHA-256(token)).
     function isAvailable() as Boolean {
-        return false;
+        return _link.ready() && Cfg.token().length() > 0;
     }
 
     function send(batch as Dictionary<String, Object>, cb as SendCallback) as Void {
-        // Not implemented: see the TODO above. Report a link error so nothing is lost.
-        cb.invoke(Communications.BLE_CONNECTION_UNAVAILABLE, null);
+        var bytes;
+        try {
+            bytes = Json.encode(batch);
+        } catch (e) {
+            cb.invoke(Communications.INVALID_HTTP_BODY_IN_REQUEST, null);
+            return;
+        }
+        var q = batch["q"];
+        if (bytes.size() > 65535 || !(q instanceof Number)) {
+            cb.invoke(413, null);
+            return;
+        }
+        _link.sendBlob(q, bytes, cb);
     }
 }

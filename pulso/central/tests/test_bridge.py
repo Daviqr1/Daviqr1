@@ -90,3 +90,95 @@ def test_rr_accumulator_batches_validate():
     batch = Batch.model_validate(b)
     assert batch.src == "strap" and batch.rr[0][0] == t + 9 * 850 and len(batch.rr[0][1]) == 10
     assert acc.saw_rr
+
+
+def _batch_json(q: int) -> bytes:
+    import json
+
+    b = {"v": 1, "d": "fr255-cap-abc123", "q": q, "src": "cap", "t": 1_760_630_460,
+         "rr": [[1_760_630_400_000, [800, 812, 790]]], "ev": [[1_760_630_401, "mark", "café"]]}
+    return json.dumps(b, ensure_ascii=False, separators=(",", ":")).encode()
+
+
+def test_blob_roundtrip_interleaved_with_stream_and_ingested():
+    import os
+    import tempfile
+
+    from pulso.bridge.peripheral import handle_blob, local_sink
+    from pulso.ingest import auth
+
+    enc, dec = FR.Encoder(), FR.Decoder()
+    tok = "pulso_dev_" + "x" * 40
+    key = FR.blob_key(tok)
+    payload = _batch_json(7)
+    sync = enc.sync(1_760_630_400_000, 3)
+    acc = enc.accel(0, 25, [(0, 0, 1000 + i) for i in range(10)])
+    blob = enc.blob(7, payload, key)
+    assert all(len(f) <= 20 for f in blob)
+    # the watch interleaves stream and blob frames and writes seq at send time
+    order = [sync] + [x for pair in zip(blob, acc + [None] * len(blob)) for x in pair if x is not None]
+    for i, f in enumerate(order):
+        dec.feed(bytes((i & 0xFF,)) + f[1:])
+    done, failed = dec.take_blobs()
+    assert failed == [] and len(done) == 1
+    q, got, mac, total = done[0]
+    assert q == 7 and got == payload and total == len(payload)
+    out = dec.take()
+    assert [s for _, _, ss in out.accel for s in ss] == [(0, 0, 1000 + i) for i in range(10)]
+
+    with tempfile.TemporaryDirectory() as d:
+        db = os.path.join(d, "p.sqlite")
+        conn = store.connect(db)
+        conn.execute("INSERT INTO device_tokens (token_sha256, label, created_ms) VALUES (?, ?, ?)",
+                     (auth._digest(tok), "fr255", 0))
+        conn.commit()
+        sink = local_sink(db)
+        assert handle_blob(sink, q, got, mac, log=lambda m: None) == FR.BLOB_OK
+        # same batch again (e.g. it also went through the phone): idempotent, still OK
+        assert handle_blob(sink, q, got, mac, log=lambda m: None) == FR.BLOB_OK
+        n = conn.execute("SELECT COUNT(*) FROM rr_intervals").fetchone()[0]
+        assert n == 3
+        # wrong key, wrong q, garbage
+        assert handle_blob(sink, q, got, FR.blob_mac(FR.blob_key("pulso_dev_other"), got), log=lambda m: None) == FR.BLOB_BAD_MAC
+        assert handle_blob(sink, 8, got, mac, log=lambda m: None) == FR.BLOB_REJECTED
+        junk = b"{not json"
+        assert handle_blob(sink, q, junk, FR.blob_mac(key, junk), log=lambda m: None) == FR.BLOB_REJECTED
+        # a revoked token no longer signs anything
+        auth.revoke(conn, "fr255")
+        conn.commit()
+        assert handle_blob(sink, q, got, mac, log=lambda m: None) == FR.BLOB_BAD_MAC
+
+
+def test_blob_lost_frame_aborts_and_asks_resend():
+    enc, dec = FR.Encoder(), FR.Decoder()
+    key = FR.blob_key("pulso_dev_k")
+    fs = enc.blob(9, _batch_json(9), key)
+    del fs[3]  # a data frame lost on the air
+    for f in fs:
+        dec.feed(f)
+    done, failed = dec.take_blobs()
+    assert done == [] and failed == [9]
+    # the re-send goes through
+    for f in enc.blob(9, _batch_json(9), key):
+        dec.feed(f)
+    done, failed = dec.take_blobs()
+    assert len(done) == 1 and failed == []
+
+
+def test_gap_before_delta_never_reuses_stale_base():
+    # a lost frame followed by a non-accel frame, then deltas: must not apply to the old base
+    enc, dec = FR.Encoder(), FR.Decoder()
+    fs = [enc.sync(1_000_000, 1)] + enc.accel(0, 25, [(0, 0, 1000 + i) for i in range(11)])
+    hr = enc.hr(500, 70)
+    more = enc.accel(400, 25, [(0, 0, 2000 + i) for i in range(11)])
+    stream = fs[:2] + [fs[2]] + [hr] + more[1:]   # drop the KEY of the second chunk -> seq gap
+    for f in stream:
+        dec.feed(f)
+    out = dec.take()
+    samples = [s for _, _, ss in out.accel for s in ss]
+    assert all(s[2] < 2000 for s in samples)   # nothing reconstructed from the orphaned deltas
+
+
+def test_blob_ack_layout():
+    a = FR.blob_ack(200, 25, 0x01020304, FR.BLOB_OK)
+    assert a == bytes((200, 25, 0xB1, 4, 3, 2, 1, 0)) and len(a) <= 20

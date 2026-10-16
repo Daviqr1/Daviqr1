@@ -214,7 +214,9 @@ class StatusView extends WatchUi.View {
                 + "  min " + cap.gov.floor.toString() + "%",
             fitText(),
             _s[:sent] as String + " " + u.sent.toString() + "  dup " + u.dups.toString(),
-            _s[:dropped] as String + " " + cap.queue.drops.toString() + "  cod " + u.lastCode.toString(),
+            _s[:dropped] as String + " " + cap.queue.drops.toString() + "  cod " + u.lastCode.toString()
+                + " " + u.transportName(),
+            bleText(),
             "mem " + (st.usedMemory / 1024).toString() + "/" + (st.totalMemory / 1024).toString() + " KB  v"
                 + Cfg.VERSION
         ] as Array<String>;
@@ -336,6 +338,16 @@ class StatusView extends WatchUi.View {
             _linkTxt = _s[:idle] as String;
             _linkColor = Ui.DIM;
         }
+    }
+
+    //! "ble ok 6.1f/s q3 -0 b12": state, frames/s, stream units queued, units dropped, batches sent
+    private function bleText() as String {
+        var b = _cap.ble;
+        if (b.state == BleSt.OFF) {
+            return "ble off";
+        }
+        return "ble " + b.stateName() + " " + b.frameRate.format("%.1f") + "f/s q" + b.queuedUnits().toString()
+            + " -" + b.dropped.toString() + " b" + b.blobsOk.toString();
     }
 
     private function fitText() as String {

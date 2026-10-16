@@ -61,6 +61,11 @@ class UploadQueue {
         return (_ids.size() > 0) ? _ids[0] : null;
     }
 
+    //! Estimated JSON size of the oldest batch (0 when empty).
+    function peekSize() as Number {
+        return (_sizes.size() > 0) ? _sizes[0] : 0;
+    }
+
     //! Store a sealed batch. Returns false if it could not be stored (counted as a drop).
     function push(q as Number, batch as Dictionary<String, Object>, size as Number) as Boolean {
         while (_ids.size() > 0 && bytes + size > MAX_BYTES) {

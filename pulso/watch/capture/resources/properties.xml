@@ -6,4 +6,6 @@
     <property id="sleepBudgetPctH" type="float">1.0</property>
     <property id="floorPct" type="number">15</property>
     <property id="fitEnabled" type="boolean">true</property>
+    <property id="bleBridge" type="boolean">false</property>
+    <property id="bleWithResponse" type="boolean">false</property>
 </properties>

@@ -19,6 +19,7 @@ module K {
     const FACE = "face";    // last `face` object returned by the central
     const ST = "st";        // last upload status [code, epoch s, q, pending]
     const SACC = "sacc";    // foreground stress accumulator (12 hourly slots)
+    const ALN = "aln";      // id of the last central alert shown as a notification
 
     const CODE_OK = 200;
     const CODE_NO_PHONE = -104;      // = Communications.BLE_CONNECTION_UNAVAILABLE

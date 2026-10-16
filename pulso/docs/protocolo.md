@@ -8,7 +8,7 @@ Fonte de verdade: `central/pulso/ingest/protocol.py` (validação) e `central/pu
 | Caminho | Quem usa | Banda real | Observação |
 |---|---|---|---|
 | `Communications.makeWebRequest` → Garmin Connect Mobile → HTTPS | mostrador (background) e app de captura | 400–800 B/s | HTTPS com certificado público; JSON; **1 requisição por vez** |
-| BLE direto (app de captura → ponte no notebook/ESP32) | app de captura | ver `docs/ponte-ble.md` | só com o app aberto |
+| BLE direto (app de captura → ponte no notebook/ESP32) | app de captura | ver `docs/ponte-ble.md` | só com o app aberto; acelerômetro bruto ao vivo + lotes v1 assinados (HMAC) quando o celular não está |
 | Arquivo FIT (USB/MTP ou export do Garmin Connect) | app de captura (`SensorLogger` + `FitContributor`) | — | acelerômetro bruto em taxa cheia |
 
 Regras de tamanho (medidas da comunidade; ninguém da Garmin documentou):

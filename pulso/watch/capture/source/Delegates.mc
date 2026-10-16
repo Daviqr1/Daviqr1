@@ -95,6 +95,7 @@ function buildMainMenu(cap as Capture) as WatchUi.Menu2 {
     menu.addItem(new WatchUi.MenuItem(Rez.Strings.MMode, Cfg.modeName(cap.mode).toUpper(), :mode, null));
     menu.addItem(new WatchUi.MenuItem(Rez.Strings.MMark, null, :mark, null));
     menu.addItem(new WatchUi.ToggleMenuItem(Rez.Strings.MFit, null, :fit, Cfg.fitEnabled(), null));
+    menu.addItem(new WatchUi.ToggleMenuItem(Rez.Strings.MBle, cap.ble.stateName(), :ble, Cfg.bleBridge(), null));
     var q = cap.queue;
     menu.addItem(new WatchUi.MenuItem(Rez.Strings.MSend,
         q.count().toString() + " / " + ((q.bytes + 512) / 1024).toString() + " KB", :send, null));
@@ -128,6 +129,15 @@ class MainMenuDelegate extends WatchUi.Menu2InputDelegate {
                     Properties.setValue("fitEnabled", item.isEnabled());
                 } catch (e) {
                 }
+            }
+        } else if (id == :ble) {
+            if (item instanceof WatchUi.ToggleMenuItem) {
+                var on = item.isEnabled();
+                try {
+                    Properties.setValue("bleBridge", on);
+                } catch (e) {
+                }
+                _cap.setBridge(on);
             }
         } else if (id == :send) {
             _cap.sealNow();

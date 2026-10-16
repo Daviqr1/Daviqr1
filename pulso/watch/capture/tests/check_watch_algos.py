@@ -2,7 +2,7 @@
 
 These are hand transliterations of the Monkey C code (float32 where the watch uses Float), run
 against the central's reference implementations and simple simulations. Keep them in sync with
-source/HrvLive.mc, AccelFeatures.mc, BatchBuilder.mc and Governor.mc.
+source/HrvLive.mc, AccelFeatures.mc, BatchBuilder.mc, Governor.mc, BleLink.mc and Json.mc.
 
     python3 watch/capture/tests/check_watch_algos.py      (needs numpy + pydantic for the wire test)
 """
@@ -266,7 +266,140 @@ def test_history_size() -> None:
     check("history_size", len(body) < 6144, f"worst-case harvest batch {len(body)} B (limit 6144)")
 
 
+# ---- BleLink (frames) + Json (blob body) vs the bridge decoder ----------------------------------------
+def watch_unit(t0_ms: int, sync_ms: int, xyz: list[tuple[int, int, int]], period: int) -> list[bytearray]:
+    """BleLink.pushAccel: ACC_KEY + ACC_DELTA frames for one sensor callback (seq left at 0)."""
+    n = len(xyz)
+    hz = max(1, min(255, (n + period // 2) // period))
+    dt = t0_ms - sync_ms
+    unit: list[bytearray] = []
+    d, k, prev = None, 0, (0, 0, 0)
+    for i, (sx, sy, sz) in enumerate(xyz):
+        dx, dy, dz = sx - prev[0], sy - prev[1], sz - prev[2]
+        if i > 0 and all(-127 <= v <= 127 for v in (dx, dy, dz)):
+            if d is None:
+                d, k = bytearray(18), 0
+                d[1] = 0x03
+            o = 3 + 3 * k
+            d[o], d[o + 1], d[o + 2] = dx & 0xFF, dy & 0xFF, dz & 0xFF
+            k += 1
+            if k == 5:
+                d[2] = 5
+                unit.append(d)
+                d = None
+        else:
+            if d is not None:
+                d[2] = k
+                unit.append(d[: 3 + 3 * k])
+                d = None
+            f = bytearray(12)
+            f[1] = 0x02
+            v = dt + (i * 1000) // hz
+            f[2:5] = bytes((v & 0xFF, (v >> 8) & 0xFF, (v >> 16) & 0xFF))
+            f[5] = hz
+            for j, c in enumerate((sx, sy, sz)):
+                f[6 + 2 * j], f[7 + 2 * j] = c & 0xFF, (c >> 8) & 0xFF
+            unit.append(f)
+        prev = (sx, sy, sz)
+    if d is not None:
+        d[2] = k
+        unit.append(d[: 3 + 3 * k])
+    return unit
+
+
+def watch_sync(sync_ms: int, session: int) -> bytearray:
+    f = bytearray(12)
+    s = sync_ms // 1000
+    f[2:6] = s.to_bytes(4, "little")
+    f[6:8] = (sync_ms - s * 1000).to_bytes(2, "little")
+    f[8:12] = session.to_bytes(4, "little")
+    return f
+
+
+def watch_blob(q: int, body: bytes, token: str) -> list[bytearray]:
+    """BleLink.sendBlob/nextBlobFrame; MAC = HMAC-SHA256(SHA-256(token), body)[:16]."""
+    import hashlib
+    import hmac
+    key = hashlib.sha256(token.encode()).digest()
+    mac = hmac.new(key, body, hashlib.sha256).digest()[:16]
+    out = [bytearray(b"\0\x08") + q.to_bytes(4, "little")]
+    for o in range(0, len(body), 18):
+        out.append(bytearray(b"\0\x09") + body[o:o + 18])
+    out.append(bytearray(b"\0\x0a") + len(body).to_bytes(2, "little") + mac)
+    return out
+
+
+def watch_json_num(d: float) -> str:
+    """Json.num: "%.4f", trailing zeros and dot stripped."""
+    s = "%.4f" % d
+    s = s.rstrip("0").rstrip(".") if "." in s else s
+    return "0" if s in ("", "-") else s
+
+
+def test_ble_frames() -> None:
+    import re
+    from pulso.bridge import frames as FR
+    from pulso.bridge import peripheral as P
+    from pulso.ingest import auth
+    from pulso import store
+
+    src = (Path(__file__).resolve().parents[1] / "source" / "BleLink.mc").read_text()
+    consts = dict(re.findall(r"const (T_[A-Z_]+) = (0x[0-9A-Fa-f]+);", src))
+    want = {"T_SYNC": FR.SYNC, "T_ACC_KEY": FR.ACC_KEY, "T_ACC_DELTA": FR.ACC_DELTA, "T_BAT": FR.BAT,
+            "T_BLOB_START": FR.BLOB_START, "T_BLOB_DATA": FR.BLOB_DATA, "T_BLOB_END": FR.BLOB_END}
+    same_types = all(int(consts.get(k, "-1"), 16) == v for k, v in want.items())
+    uuids = set(re.findall(r"6c1e000[123]-5b7a-4d6e-9f2a-50554c534f31", src))
+    same_uuids = uuids == {P.SERVICE_UUID, P.DATA_UUID, P.CTRL_UUID}
+
+    rng = np.random.default_rng(3)
+    t0 = 1760630400000
+    sync_ms = t0 - 10000
+    xyz, p = [], (0, 0, 1000)
+    for i in range(50):   # two 1-s callbacks at 25 Hz, with one jump that forces a keyframe
+        p = (p[0] + int(rng.integers(-60, 60)), p[1] + int(rng.integers(-60, 60)), p[2] + (300 if i == 37 else 0))
+        xyz.append(p)
+    stream = [watch_sync(sync_ms, 1760630400)] + watch_unit(t0, sync_ms, xyz[:25], 1) + watch_unit(t0 + 1000, sync_ms, xyz[25:], 1)
+    bat = bytearray(b"\0\x07") + bytes((64, 23))
+    tok = "pulso_dev_" + "y" * 43
+    batch = {"v": 1, "d": "fr255-cap-a1b2c3", "q": 11, "src": "cap", "t": 1760630461,
+             "rr": [[t0 + 900, [812, 820]]], "bat": [1760630460, float(watch_json_num(63.5)), None],
+             "ev": [[1760630400, "mark", "reunião começou"]]}
+    body = json.dumps(batch, ensure_ascii=False, separators=(",", ":")).encode()
+    blob = watch_blob(11, body, tok)
+    # BleLink.pump alternates blob / stream frames and writes seq at send time
+    order, si, bi, turn = [], 0, 0, False
+    allstream = stream + [bat]
+    while si < len(allstream) or bi < len(blob):
+        if bi < len(blob) and (turn or si >= len(allstream)):
+            order.append(blob[bi]); bi += 1; turn = False
+        else:
+            order.append(allstream[si]); si += 1; turn = True
+    dec = FR.Decoder()
+    for i, f in enumerate(order):
+        f = bytearray(f); f[0] = i & 0xFF
+        assert len(f) <= 20
+        dec.feed(bytes(f))
+    done, failed = dec.take_blobs()
+    out = dec.take()
+    samples = [s for _, _, ss in out.accel for s in ss]
+    t_first = out.accel[0][0] if out.accel else None
+    ok_stream = samples == xyz and t_first == t0 and out.battery == (64, 2.3) and out.lost_frames == 0
+    with tempfile.TemporaryDirectory() as d:
+        db = os.path.join(d, "t.sqlite")
+        conn = store.connect(db)
+        conn.execute("INSERT INTO device_tokens (token_sha256, label, created_ms) VALUES (?, ?, 0)", (auth._digest(tok), "fr255"))
+        conn.commit()
+        st = P.handle_blob(P.local_sink(db), *done[0][:3], log=lambda m: None) if len(done) == 1 else -1
+    ok_blob = not failed and st == FR.BLOB_OK
+    nums = [watch_json_num(v) for v in (64.0, 63.5, 0.1, -0.00001, 12.34567)]
+    ok_num = nums == ["64", "63.5", "0.1", "-0", "12.3457"] and all(json.loads(x) is not None for x in nums)
+    check("ble_frames", same_types and same_uuids and ok_stream and ok_blob and ok_num,
+          f"types={same_types} uuids={same_uuids} stream={ok_stream} ({len(samples)} samples, "
+          f"{len(order)} frames) blob={ok_blob} json_num={nums}")
+
+
 if __name__ == "__main__":
-    for t in (test_dfa, test_enmo_mad, test_gate, test_rr_anchor, test_governor, test_wire, test_history_size):
+    for t in (test_dfa, test_enmo_mad, test_gate, test_rr_anchor, test_governor, test_wire, test_history_size,
+              test_ble_frames):
         t()
     sys.exit(1 if FAILED else 0)

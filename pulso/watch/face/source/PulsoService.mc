@@ -3,6 +3,7 @@ import Toybox.Application;
 import Toybox.Background;
 import Toybox.Communications;
 import Toybox.Lang;
+import Toybox.Notifications;
 import Toybox.Math;
 import Toybox.SensorHistory;
 import Toybox.System;
@@ -378,6 +379,7 @@ class PulsoService extends System.ServiceDelegate {
                 var f = data["face"];
                 if (f instanceof Dictionary) {
                     _face = f;
+                    Alert.show(f);
                 }
             }
         } else if (_fresh) {
@@ -472,5 +474,37 @@ class PulsoService extends System.ServiceDelegate {
             out.remove("face");
             Background.exit(out as Application.PropertyValueType);
         }
+    }
+}
+
+//! The central's newest alert (`al` in the face state: {i: stable id, m: text <= 60}) shown once
+//! as a native notification. Runs in the background service, where the SDK documents
+//! Notifications.showNotification (API 5.1.0); the last id shown is kept in Storage so the same
+//! alert, repeated in every face state for 30 min, notifies only once.
+(:background)
+module Alert {
+    function show(face as Dictionary) as Void {
+        var al = face["al"];
+        if (!(al instanceof Dictionary) || !Cfg.flag("alertNotify", true)) {
+            return;
+        }
+        var id = al["i"];
+        var msg = al["m"];
+        if (!(id instanceof Number) || !(msg instanceof String)) {
+            return;
+        }
+        var last = Store.get(K.ALN);
+        if (last instanceof Number && last == id) {
+            return;
+        }
+        if (Toybox has :Notifications) {
+            try {
+                // empty :actions and no :data: an informational notification (no "open app")
+                Notifications.showNotification("Pulso", msg, {:actions => [] as Array<Notifications.Action>, :dismissPrevious => true});
+            } catch (e) {
+                return;   // not stored: retried on the next run while the alert is fresh
+            }
+        }
+        Store.put(K.ALN, id);
     }
 }

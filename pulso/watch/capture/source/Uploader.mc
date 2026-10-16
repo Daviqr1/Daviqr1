@@ -31,16 +31,24 @@ class UploadCall {
     }
 }
 
-//! Drains the UploadQueue through a Transport: one request in flight, oldest batch first,
-//! back-to-back while it succeeds, exponential backoff on errors (longer without a phone).
+//! Drains the UploadQueue: one request in flight, oldest batch first, back-to-back while it
+//! succeeds, exponential backoff on errors (longer without a phone).
+//!
+//! Routing, per batch: the phone (HTTPS through Garmin Connect Mobile) is the default; the BLE
+//! bridge on the laptop takes the batch when the phone is not connected, when the batch is too
+//! big for the phone route, or when no central URL is configured. The live raw accelerometer
+//! never enters this queue: it streams straight to the bridge (BleLink).
 //! A batch is only ever dropped for errors that are about the batch itself; link, server
 //! availability and configuration errors (no phone, timeouts, 404, 502-504, tunnel down) keep
 //! it queued however long they last.
 class Uploader {
     const STUCK_MS = 180000;      // the system always calls back; this only guards a lost callback
     const GIVE_UP_TRIES = 8;      // per batch, for batch-specific errors (500/501, -402/-403)
+    const PHONE_MAX_BYTES = 6000; // larger POST bodies risk -402/-403 through the phone
 
     private var _queue as UploadQueue;
+    private var _http as HttpTransport;
+    private var _ble as BleTransport;
     private var _transport as Transport;
     private var _inFlight as Number or Null = null;   // q of the current attempt
     private var _attempt as Number = 0;               // id of the current attempt
@@ -57,10 +65,25 @@ class Uploader {
     var sent as Number = 0;
     var dups as Number = 0;
 
-    function initialize(queue as UploadQueue) {
+    function initialize(queue as UploadQueue, link as BleLink) {
         _queue = queue;
-        _transport = new HttpTransport();
+        _http = new HttpTransport();
+        _ble = new BleTransport(link);
+        _transport = _http;
         status = Cfg.hasCentral() ? Link.IDLE : Link.NOCFG;
+    }
+
+    //! Which way the next batch goes (null = no way right now).
+    function route(size as Number) as Transport or Null {
+        var bleOk = _ble.isAvailable();
+        var httpOk = _http.isAvailable();
+        if (bleOk && (size > PHONE_MAX_BYTES || !httpOk || !System.getDeviceSettings().phoneConnected)) {
+            return _ble;
+        }
+        if (httpOk) {
+            return _http;   // phone state unknown or connected: the error path handles "no phone"
+        }
+        return bleOk ? _ble : null;
     }
 
     function transportName() as String {
@@ -117,11 +140,13 @@ class Uploader {
             _wanted = false;
             return;
         }
-        if (!_transport.isAvailable()) {
+        var t = route(_queue.peekSize());
+        if (t == null) {
             status = Link.NOCFG;
             _wanted = false;
             return;
         }
+        _transport = t;
         var b = _queue.load(q);
         if (b == null) {
             _queue.reject(q);   // index pointed at a missing value

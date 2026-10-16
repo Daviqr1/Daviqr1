@@ -97,7 +97,7 @@ def main(argv: list[str] | None = None) -> int:
     bh.add_argument("--probe", action="store_true", help="só testa se vem RR (ex.: broadcast do FR255)")
     for b in (bw, bh):
         b.add_argument("--central", help="URL da central (senão grava direto no banco local)")
-        b.add_argument("--token", help="token de aparelho para a central")
+        b.add_argument("--token", help="token de aparelho para a central (o mesmo do relógio: assina os lotes que vêm pela ponte)")
 
     nb = sub.add_parser("notebook", help="tudo no notebook: ingestão + painel + jobs (+ ponte BLE, + túnel)")
     nb.add_argument("--port", type=int, default=8080)

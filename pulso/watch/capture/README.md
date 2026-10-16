@@ -7,7 +7,7 @@ central; o relógio captura, calcula o mínimo (features de 1 s, HRV para a tela
 transmite.
 
 - Contrato do fio: [`docs/protocolo.md`](../../docs/protocolo.md) (validado em `central/pulso/ingest/protocol.py`).
-- Ponte BLE (próxima etapa): [`docs/ponte-ble.md`](../../docs/ponte-ble.md).
+- Ponte BLE com o notebook: [`docs/ponte-ble.md`](../../docs/ponte-ble.md).
 
 ## Modos
 
@@ -88,8 +88,18 @@ Sem central configurada a captura funciona normalmente, guarda na fila e a tela 
 2. **Arquivo FIT** (TREINO/MAX): a atividade “Pulso Treino”/“Pulso Max” sai com o acelerômetro bruto do
    `SensorLogger` e os campos de desenvolvedor abaixo. Pegue por USB em `GARMIN/Activity/` ou exporte o
    original no Garmin Connect (atividade → engrenagem → “Exportar original”). O importador FIT da central lê.
-3. **Ponte BLE** (em breve): RR e acelerômetro direto para o notebook/ESP32, sem celular. A classe
-   `BleTransport` já existe como esboço, ver `docs/ponte-ble.md`.
+3. **Ponte BLE** (menu → “Ponte BLE (notebook)”, ou nas configurações): o relógio conecta direto no
+   `pulso notebook --ble` / `pulso bridge watch` (`BleLink.mc`). Por ela vão:
+   - o **acelerômetro bruto** ao vivo, na taxa da captura — grande demais para o celular. Fila de ~40 s no
+     relógio; se a ponte não acompanha, o segundo mais antigo inteiro é descartado (nunca meio segundo);
+   - os **lotes da fila** quando o celular não está conectado, quando o lote passa de 6 KB ou quando não há
+     URL de central configurada: JSON assinado com HMAC-SHA256 (chave = SHA-256 do token), apagado da fila só
+     depois que a ponte confirma que gravou.
+
+   Roteamento por lote (`Uploader.route`): celular é o padrão; BLE nos três casos acima. A tela de detalhes
+   mostra `ble <estado> <frames/s> q<fila> -<descartados> b<lotes>` e por onde saiu o último lote.
+   Use o **mesmo token** no relógio e na ponte remota (`pulso bridge watch --central … --token …`); com
+   `pulso notebook --ble` a ponte confere contra os tokens do próprio banco.
 
 Campos de desenvolvedor no FIT (um registro por segundo):
 
@@ -219,7 +229,8 @@ São transliterações à mão: quem mudar `HrvLive.mc`, `AccelFeatures.mc`, `Ba
 | `source/AccelFeatures.mc` | ENMO/MAD (e giroscópio) por segundo |
 | `source/BatchBuilder.mc` | lote aberto no formato do protocolo + estimativa de tamanho |
 | `source/UploadQueue.mc` | fila persistente limitada, sequência `q` |
-| `source/Uploader.mc`, `source/Transport.mc` | envio com backoff; `HttpTransport`; esboço `BleTransport` |
+| `source/Uploader.mc`, `source/Transport.mc` | envio com backoff e roteamento celular/BLE; `HttpTransport`, `BleTransport` |
+| `source/BleLink.mc`, `source/Json.mc` | ponte BLE (scan, conexão, frames de 20 B, lotes assinados); JSON → bytes |
 | `source/Governor.mc` | governador de bateria |
 | `source/FitRecorder.mc` | sessão FIT, SensorLogger, campos de desenvolvedor |
 | `source/StatusView.mc`, `source/Delegates.mc` | tela, botões e menus |

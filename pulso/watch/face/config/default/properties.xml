@@ -5,5 +5,6 @@
     <property id="showSeconds" type="boolean">true</property>
     <property id="ringSource" type="number">0</property>
     <property id="batterySaver" type="boolean">true</property>
+    <property id="alertNotify" type="boolean">true</property>
     <property id="deviceId" type="string"></property>
 </properties>

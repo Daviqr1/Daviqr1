@@ -23,7 +23,7 @@ real é independência do celular, latência baixa e estável, e os dados chegan
 ## Protocolo de frames (≤ 20 bytes)
 
 Implementado em `central/pulso/bridge/frames.py` (decodificador e codificador de referência) e no
-`BleTransport` do Pulso Captura.
+`BleLink.mc` do Pulso Captura (conferido contra o decodificador em `watch/capture/tests/check_watch_algos.py`).
 
 ```
 byte 0  seq   u8 (incrementa por frame; o periférico confirma o último recebido)
@@ -38,13 +38,30 @@ byte 1  tipo  u8
 0x05 HR         dt u24 | bpm u8
 0x06 MARK       dt u24 | código u8 (1 estresse, 2 café, 3 reunião começou, 4 reunião acabou)
 0x07 BAT        pct u8 | consumo ×10 u8 (%/h)
+0x08 BLOB_START q u32                                             (um lote v1 da fila vem a seguir)
+0x09 BLOB_DATA  até 18 bytes do JSON
+0x0A BLOB_END   total u16 | mac 16 B   (HMAC-SHA256(SHA-256(token), JSON)[:16])
 
 dt = ms desde o último SYNC (u24 → até 4,6 h)
 notificação do periférico (característica CTRL): último_seq u8 | taxa_acel_sugerida u8
+                                    [| 0xB1 | q u32 | status u8]   (0 gravado, 1 rejeitado, 2 assinatura, 3 reenviar)
 ```
 
-Perda de frame é detectada pelo `seq`; deltas depois de uma perda são descartados até o próximo
-keyframe, então o decodificador **nunca inventa amostra**.
+O relógio escreve o `seq` na hora da transmissão, então um buraco no `seq` é perda no ar. Depois de
+qualquer perda o decodificador ignora deltas até o próximo keyframe e aborta o lote (BLOB) em curso — ele
+**nunca inventa amostra**, e o relógio reenvia o lote inteiro com o mesmo `q` (a central deduplica).
+
+### O que vai por onde (relógio)
+
+| Tráfego | Por BLE quando | Senão |
+|---|---|---|
+| Acelerômetro bruto (ACC_KEY + deltas, 1 unidade por callback do sensor) e bateria | ponte conectada e captura rodando; taxa sugerida pela ponte ≠ 0 | não sai do relógio (só a feature por segundo nos lotes; bruto completo no FIT do TREINO/MAX) |
+| Lote da fila (JSON v1, RR, features, FC, pressão, histórico, marcações) | celular desconectado, lote > 6 KB ou sem URL de central | celular (HTTPS) |
+
+Os dois tipos se alternam frame a frame, uma escrita por vez. A fila do fluxo guarda ~40 s; se a ponte não
+acompanha, descarta o **segundo inteiro** mais antigo (nunca um delta solto, nunca o SYNC do qual os
+seguintes dependem). Um lote só sai da fila do relógio depois do `0xB1 … 0` da ponte, que vem depois de
+gravado no banco (ou aceito pela central remota).
 
 GATT (UUIDs em `bridge/peripheral.py`):
 
@@ -65,8 +82,14 @@ pulso bridge watch
 pulso bridge watch --central https://pulso.seudominio.dev --token pulso_dev_...
 ```
 
-No relógio: Pulso Captura → modo **Ponte BLE**. O log do `pulso bridge watch` mostra frames/s a cada
-minuto — é o primeiro número a medir no seu FR255.
+No relógio: Pulso Captura → menu → **Ponte BLE (notebook)** (ou nas configurações do app). O relógio procura
+o serviço, conecta, liga as notificações e começa a mandar; a tela de detalhes mostra
+`ble ok 6.1f/s q2 -0 b3` (estado, frames/s, fila do fluxo, segundos descartados, lotes entregues). O log do
+`pulso bridge watch` mostra frames/s a cada minuto — é o primeiro número a medir no seu FR255.
+
+Token: com `pulso notebook --ble` (ou `pulso bridge watch` sem `--central`) a ponte confere a assinatura dos
+lotes contra os tokens ativos do próprio banco. Com `--central … --token T`, use **o mesmo T** configurado
+no relógio — senão o lote volta como “token inválido”.
 
 ESP32 (fase 2, sem notebook ligado): o mesmo GATT com NimBLE-Arduino 2.x, encaminhando os frames por
 Wi-Fi para `POST /v1/ingest` depois de decodificar (ou mandando os frames crus para um endpoint que use
@@ -90,10 +113,17 @@ pulso bridge hrm --name "Forerunner 255" --probe     # 2 min: o broadcast de FC 
 
 ## Segurança
 
-O characteristic DATA é aberto (o Connect IQ só ganhou bonding nas APIs 4.2.5/5.1). Mitigações:
-o periférico só aceita frames bem formados, a sessão é identificada no SYNC, e os dados são fisiológicos
-de baixo valor fora de contexto. Se quiser mais: bonding (`Device.requestBond`, suportado no FR255) ou
-HMAC por frame com `Toybox.Cryptography` — ambos ainda a testar com BlueZ/NimBLE.
+O characteristic DATA é aberto (o Connect IQ só ganhou bonding nas APIs 4.2.5/5.1). O que protege:
+
+- **Lotes da fila** (tudo o que vira medida, marcação ou evento): HMAC-SHA256 com chave = SHA-256 do token do
+  aparelho, conferido antes de gravar. A central já guarda exatamente esse SHA-256 de cada token (nunca o
+  token), então a ponte local não precisa de segredo próprio; token revogado deixa de assinar na hora. O
+  token em si nunca passa pelo ar.
+- **Fluxo ao vivo** (acelerômetro bruto e bateria): sem assinatura por frame (custaria metade da banda).
+  Alguém a poucos metros, durante a sessão de mesa, conseguiria injetar movimento falso com fonte
+  `ble:bridge` — que entra só na análise de movimento, nunca em RR, estresse ou eventos.
+- Próximos passos se quiser fechar o fluxo também: bonding (`Device.requestBond`, suportado no FR255) ou um
+  HMAC por SYNC cobrindo os frames do intervalo — a testar com BlueZ/NimBLE.
 
 ## O que medir primeiro no seu relógio
 

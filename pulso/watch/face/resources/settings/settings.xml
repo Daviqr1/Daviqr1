@@ -21,6 +21,9 @@
     <setting propertyKey="@Properties.batterySaver" title="@Strings.SetSaverTitle">
         <settingConfig type="boolean"/>
     </setting>
+    <setting propertyKey="@Properties.alertNotify" title="@Strings.SetAlertTitle">
+        <settingConfig type="boolean"/>
+    </setting>
     <setting propertyKey="@Properties.deviceId" title="@Strings.SetDeviceIdTitle">
         <settingConfig type="alphaNumeric" readonly="true"/>
     </setting>

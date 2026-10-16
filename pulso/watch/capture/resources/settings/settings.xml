@@ -25,4 +25,10 @@
     <setting propertyKey="@Properties.fitEnabled" title="@Strings.SFitTitle">
         <settingConfig type="boolean" />
     </setting>
+    <setting propertyKey="@Properties.bleBridge" title="@Strings.SBleTitle">
+        <settingConfig type="boolean" />
+    </setting>
+    <setting propertyKey="@Properties.bleWithResponse" title="@Strings.SBleRespTitle">
+        <settingConfig type="boolean" />
+    </setting>
 </settings>

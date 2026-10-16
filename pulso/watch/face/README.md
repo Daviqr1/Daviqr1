@@ -53,6 +53,7 @@ somem depois de 36 h sem atualização; picos só aparecem se forem do dia de ho
 | `showSeconds` | ligado | segundos (atualização parcial de 1 Hz quando a tela está em baixo consumo) |
 | `ringSource` | Automático | anel: central, senão Garmin / só central / só Garmin |
 | `batterySaver` | ligado | governador: envio a cada 5 min; 10 min com bateria < 30 %; 20 min < 15 %; sem segundos < 15 % (nada disso quando está carregando) |
+| `alertNotify` | ligado | mostra como notificação do relógio o alerta novo que a central manda (`al`), uma vez por alerta |
 | `deviceId` | (somente leitura) | id aleatório do relógio (`fr255-xxxxxxxx`) usado nos lotes, para conferir na central |
 
 **Atenção:** o app Garmin Connect só edita configurações de apps instalados pela **Connect IQ Store**
@@ -116,7 +117,10 @@ resources-round-218x218` e acrescente `fr255s`/`fr255sm` ao manifesto.
    incrementado e salvo **antes** do envio, então `(d, q)` nunca se repete e a central descarta
    reenvios duplicados.
 4. HTTP 200: avança os cursores, guarda o objeto `face` da resposta e, se sobrar tempo
-   (< 15 s, até 3 requisições), envia lotes antigos da fila.
+   (< 15 s, até 3 requisições), envia lotes antigos da fila. Se o `face` traz um alerta (`al: {i, m}`)
+   com `i` diferente do último mostrado, chama `Notifications.showNotification("Pulso", m)` (API 5.1,
+   suportada no FR255; notificação informativa, sem ação de abrir) e guarda `i` em `aln`. O alerta
+   chega em até 5 min (o intervalo do evento temporal) e só enquanto o Pulso é o mostrador ativo.
 5. Falha transitória (sem celular, timeout, 5xx, 401…): o lote vai para uma fila de até 3 lotes no
    `Storage` (o mais antigo é descartado) e será reenviado com o **mesmo** `q`. Os cursores não
    andam, então o próximo lote relê a última hora do histórico; pontos repetidos entre lotes da fila

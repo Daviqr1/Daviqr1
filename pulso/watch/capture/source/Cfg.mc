@@ -114,6 +114,11 @@ module Cfg {
         return bool("fitEnabled", true);
     }
 
+    //! BLE bridge to the laptop (raw accelerometer + batches without the phone).
+    function bleBridge() as Boolean {
+        return bool("bleBridge", false);
+    }
+
     //! Battery budget in %/h; 0 disables the governor (the floor still applies).
     //! FOCO: budgetPctH. SONO: sleepBudgetPctH. TREINO: 2 x budgetPctH (short, intentional
     //! sessions with a strap and FIT). MAX: no budget, only the floor.

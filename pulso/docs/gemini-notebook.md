@@ -70,7 +70,7 @@ Horários (no `pulso notebook`/`pulso daemon`): relatório 06:30, Docs 06:45, e 
 
 | Canal | Quando | Como |
 |---|---|---|
-| **Relógio** (mostrador Pulso) | tempo real | notificação nativa quando a central cria um alerta |
+| **Relógio** (mostrador Pulso) | até 5 min | notificação nativa do relógio, uma vez por alerta (desliga em `alertNotify`) |
 | **Google Agenda** (opcional) | tempo real | `PULSO_GCAL_ALERTS=1`: evento “⚠ Pulso: …” com lembrete pop-up no minuto 0, privado e sem bloquear a agenda |
 | **Programação do Gemini** | resumo diário | crie no app Gemini (ex.: todo dia 08:00) com o prompt abaixo |
 
