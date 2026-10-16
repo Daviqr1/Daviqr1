@@ -109,6 +109,7 @@ class Uploader {
 
     //! Call once per second.
     function tick(nowS as Number) as Void {
+        _ble.tick();
         if (_inFlight != null && System.getTimer() - _sentTimer > STUCK_MS) {
             _inFlight = null;
             lastCode = Communications.NETWORK_REQUEST_TIMED_OUT;

@@ -58,6 +58,11 @@ qualquer perda o decodificador ignora deltas até o próximo keyframe e aborta o
 | Acelerômetro bruto (ACC_KEY + deltas, 1 unidade por callback do sensor) e bateria | ponte conectada e captura rodando; taxa sugerida pela ponte ≠ 0 | não sai do relógio (só a feature por segundo nos lotes; bruto completo no FIT do TREINO/MAX) |
 | Lote da fila (JSON v1, RR, features, FC, pressão, histórico, marcações) | celular desconectado, lote > 6 KB ou sem URL de central | celular (HTTPS) |
 
+Acima da taxa que a ponte pede (`taxa_acel_sugerida`, 25 Hz por padrão; 0 desliga o bruto) o relógio tira
+a média de grupos de k amostras (k = ⌈taxa/sugerida⌉) — no MAX a 100 Hz seriam ~4× os frames que o link
+aguenta. O JSON de um lote é montado em pedaços de 300 valores por segundo: o FR255 sem Music tem metade do
+orçamento de watchdog dos outros relógios 5.x.
+
 Os dois tipos se alternam frame a frame, uma escrita por vez. A fila do fluxo guarda ~40 s; se a ponte não
 acompanha, descarta o **segundo inteiro** mais antigo (nunca um delta solto, nunca o SYNC do qual os
 seguintes dependem). Um lote só sai da fila do relógio depois do `0xB1 … 0` da ponte, que vem depois de

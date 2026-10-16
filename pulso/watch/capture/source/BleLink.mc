@@ -163,13 +163,18 @@ class BleLink extends BluetoothLowEnergy.BleDelegate {
     // ---- stream -----------------------------------------------------------------------------
 
     //! One sensor callback worth of accelerometer (mG): ACC_KEY + deltas (a delta beyond ±127 mG
-    //! starts a new key). t0Ms = time of the first sample, n samples over `period` seconds.
+    //! starts a new key). t0Ms = time of the first sample, n samples over `period` seconds. Above
+    //! the rate the bridge asks for (hint, 25 Hz by default) groups of k samples are averaged
+    //! (k = ceil(rate / hint)): 100 Hz in MAX would need ~4x the frames the link can carry.
     function pushAccel(t0Ms as Long, x as Array<Numeric>, y as Array<Numeric>, z as Array<Numeric>, n as Number,
             period as Number) as Void {
         if (!streaming() || n <= 0) {
             return;
         }
-        var hz = (n + period / 2) / period;
+        var rate = (n + period / 2) / period;
+        var k = (rate > hint) ? (rate + hint - 1) / hint : 1;
+        var nOut = (n + k - 1) / k;
+        var hz = (nOut + period / 2) / period;
         hz = (hz < 1) ? 1 : ((hz > 255) ? 255 : hz);
         var dt = syncFor(t0Ms);
         var unit = [] as Array<ByteArray>;
@@ -177,39 +182,58 @@ class BleLink extends BluetoothLowEnergy.BleDelegate {
         var py = 0;
         var pz = 0;
         var d = null as ByteArray or Null;
-        var k = 0;
-        for (var i = 0; i < n; i++) {
-            var sx = i16(x[i]);
-            var sy = i16(y[i]);
-            var sz = i16(z[i]);
+        var m = 0;
+        for (var j = 0; j < nOut; j++) {
+            var sx;
+            var sy;
+            var sz;
+            if (k == 1) {
+                sx = i16(x[j]);
+                sy = i16(y[j]);
+                sz = i16(z[j]);
+            } else {
+                var a = j * k;
+                var b = (a + k > n) ? n : a + k;
+                var ax = 0;
+                var ay = 0;
+                var az = 0;
+                for (var i = a; i < b; i++) {
+                    ax += x[i].toNumber();
+                    ay += y[i].toNumber();
+                    az += z[i].toNumber();
+                }
+                sx = i16(ax / (b - a));
+                sy = i16(ay / (b - a));
+                sz = i16(az / (b - a));
+            }
             var dx = sx - px;
             var dy = sy - py;
             var dz = sz - pz;
-            if (i > 0 && dx >= -127 && dx <= 127 && dy >= -127 && dy <= 127 && dz >= -127 && dz <= 127) {
+            if (j > 0 && dx >= -127 && dx <= 127 && dy >= -127 && dy <= 127 && dz >= -127 && dz <= 127) {
                 if (d == null) {
                     d = new [18]b;
                     d[1] = T_ACC_DELTA;
-                    k = 0;
+                    m = 0;
                 }
-                var o = 3 + 3 * k;
+                var o = 3 + 3 * m;
                 d[o] = dx & 0xFF;
                 d[o + 1] = dy & 0xFF;
                 d[o + 2] = dz & 0xFF;
-                k++;
-                if (k == 5) {
+                m++;
+                if (m == 5) {
                     d[2] = 5;
                     unit.add(d);
                     d = null;
                 }
             } else {
                 if (d != null) {
-                    d[2] = k;
-                    unit.add(d.slice(0, 3 + 3 * k));
+                    d[2] = m;
+                    unit.add(d.slice(0, 3 + 3 * m));
                     d = null;
                 }
                 var f = new [12]b;
                 f[1] = T_ACC_KEY;
-                put24(f, 2, dt + (i * 1000) / hz);
+                put24(f, 2, dt + (j * 1000) / hz);
                 f[5] = hz;
                 put16(f, 6, sx);
                 put16(f, 8, sy);
@@ -221,8 +245,8 @@ class BleLink extends BluetoothLowEnergy.BleDelegate {
             pz = sz;
         }
         if (d != null) {
-            d[2] = k;
-            unit.add(d.slice(0, 3 + 3 * k));
+            d[2] = m;
+            unit.add(d.slice(0, 3 + 3 * m));
         }
         addUnit(unit);
         pump();

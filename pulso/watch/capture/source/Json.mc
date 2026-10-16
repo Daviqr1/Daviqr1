@@ -6,17 +6,90 @@ import Toybox.StringUtil;
 //! only for the BLE route, where the batch travels as bytes. Output goes through a short String
 //! buffer so the cost stays linear (Monkey C strings are immutable).
 module Json {
-    function encode(v as Object or Null) as ByteArray {
-        var w = new JsonWriter();
-        w.value(v);
-        return w.bytes();
-    }
-
     function utf8(s as String) as ByteArray {
         return StringUtil.convertEncodedString(s, {
             :fromRepresentation => StringUtil.REPRESENTATION_STRING_PLAIN_TEXT,
             :toRepresentation => StringUtil.REPRESENTATION_BYTE_ARRAY
         }) as ByteArray;
+    }
+}
+
+//! Resumable encoder: step(n) writes at most n values and returns true when the document is
+//! complete. A 4-6 KB batch has ~1500 values; the non-Music FR255 has half the watchdog budget
+//! of the other 5.x watches, so the BLE transport spreads the work over a few ticks.
+class JsonJob {
+    const MAX_DEPTH = 8;
+
+    private var _w as JsonWriter;
+    private var _c as Array<Array or Dictionary or Null>;   // open containers
+    private var _k as Array<Array or Null>;                 // their keys (dictionaries)
+    private var _i as Array<Number>;                        // next index in each
+    private var _depth as Number = 0;
+
+    function initialize(root as Object or Null) {
+        _w = new JsonWriter();
+        _c = new [MAX_DEPTH] as Array<Array or Dictionary or Null>;
+        _k = new [MAX_DEPTH] as Array<Array or Null>;
+        _i = new [MAX_DEPTH] as Array<Number>;
+        open(root);
+    }
+
+    function bytes() as ByteArray {
+        return _w.bytes();
+    }
+
+    function step(budget as Number) as Boolean {
+        while (budget > 0 && _depth > 0) {
+            var d = _depth - 1;
+            var c = _c[d];
+            var keys = _k[d];
+            var i = _i[d];
+            var n = (keys != null) ? keys.size() : (c as Array).size();
+            if (i >= n) {
+                _w.raw((keys != null) ? "}" : "]");
+                _c[d] = null;
+                _k[d] = null;
+                _depth = d;
+                continue;
+            }
+            if (i > 0) {
+                _w.raw(",");
+            }
+            var v;
+            if (keys != null) {
+                var key = keys[i] as Object;
+                _w.str(key.toString());
+                _w.raw(":");
+                v = (c as Dictionary)[key];
+            } else {
+                v = (c as Array)[i];
+            }
+            _i[d] = i + 1;
+            open(v as Object or Null);
+            budget--;
+        }
+        return _depth == 0;
+    }
+
+    private function open(v as Object or Null) as Void {
+        if ((v instanceof Array || v instanceof Dictionary) && _depth >= MAX_DEPTH) {
+            _w.raw("null");   // never happens with batches (depth <= 4)
+        } else if (v instanceof Array) {
+            _w.raw("[");
+            push(v, null);
+        } else if (v instanceof Dictionary) {
+            _w.raw("{");
+            push(v, v.keys() as Array);
+        } else {
+            _w.value(v);
+        }
+    }
+
+    private function push(c as Array or Dictionary, keys as Array or Null) as Void {
+        _c[_depth] = c;
+        _k[_depth] = keys;
+        _i[_depth] = 0;
+        _depth++;
     }
 }
 
@@ -33,6 +106,16 @@ class JsonWriter {
         return _out;
     }
 
+    function raw(s as String) as Void {
+        put(s);
+    }
+
+    function str(s as String) as Void {
+        put("\"");
+        put(escape(s));
+        put("\"");
+    }
+
     private function put(s as String) as Void {
         _buf += s;
         if (_buf.length() >= 160) {
@@ -47,6 +130,7 @@ class JsonWriter {
         }
     }
 
+    //! Scalars; containers are opened by JsonJob.
     function value(v as Object or Null) as Void {
         if (v == null) {
             put("null");
@@ -57,32 +141,7 @@ class JsonWriter {
         } else if (v instanceof Float || v instanceof Double) {
             put(num(v.toDouble()));
         } else if (v instanceof String) {
-            put("\"");
-            put(escape(v));
-            put("\"");
-        } else if (v instanceof Array) {
-            put("[");
-            for (var i = 0; i < v.size(); i++) {
-                if (i > 0) {
-                    put(",");
-                }
-                value(v[i] as Object or Null);
-            }
-            put("]");
-        } else if (v instanceof Dictionary) {
-            put("{");
-            var ks = v.keys();
-            for (var i = 0; i < ks.size(); i++) {
-                if (i > 0) {
-                    put(",");
-                }
-                var k = ks[i];
-                put("\"");
-                put(escape(k.toString()));
-                put("\":");
-                value(v[k] as Object or Null);
-            }
-            put("}");
+            str(v);
         } else {
             put("null");   // nothing else is ever put in a batch
         }

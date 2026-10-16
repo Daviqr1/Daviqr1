@@ -267,44 +267,103 @@ def test_history_size() -> None:
 
 
 # ---- BleLink (frames) + Json (blob body) vs the bridge decoder ----------------------------------------
-def watch_unit(t0_ms: int, sync_ms: int, xyz: list[tuple[int, int, int]], period: int) -> list[bytearray]:
-    """BleLink.pushAccel: ACC_KEY + ACC_DELTA frames for one sensor callback (seq left at 0)."""
+def watch_unit(t0_ms: int, sync_ms: int, xyz: list[tuple[int, int, int]], period: int, hint: int = 25) -> list[bytearray]:
+    """BleLink.pushAccel: ACC_KEY + ACC_DELTA frames for one sensor callback (seq left at 0);
+    above `hint` Hz, groups of k = ceil(rate / hint) samples are averaged (Monkey C integer division)."""
     n = len(xyz)
-    hz = max(1, min(255, (n + period // 2) // period))
+    rate = (n + period // 2) // period
+    k = (rate + hint - 1) // hint if rate > hint else 1
+    n_out = (n + k - 1) // k
+    hz = max(1, min(255, (n_out + period // 2) // period))
+
+    def idiv(a: int, b: int) -> int:   # Monkey C truncates toward zero
+        q = abs(a) // abs(b)
+        return q if (a >= 0) == (b >= 0) else -q
+
+    pts = []
+    for j in range(n_out):
+        grp = xyz[j * k: min(n, j * k + k)]
+        pts.append(tuple(max(-32768, min(32767, idiv(sum(p[c] for p in grp), len(grp)))) for c in range(3)))
     dt = t0_ms - sync_ms
     unit: list[bytearray] = []
-    d, k, prev = None, 0, (0, 0, 0)
-    for i, (sx, sy, sz) in enumerate(xyz):
+    d, m, prev = None, 0, (0, 0, 0)
+    for i, (sx, sy, sz) in enumerate(pts):
         dx, dy, dz = sx - prev[0], sy - prev[1], sz - prev[2]
         if i > 0 and all(-127 <= v <= 127 for v in (dx, dy, dz)):
             if d is None:
-                d, k = bytearray(18), 0
+                d, m = bytearray(18), 0
                 d[1] = 0x03
-            o = 3 + 3 * k
+            o = 3 + 3 * m
             d[o], d[o + 1], d[o + 2] = dx & 0xFF, dy & 0xFF, dz & 0xFF
-            k += 1
-            if k == 5:
+            m += 1
+            if m == 5:
                 d[2] = 5
                 unit.append(d)
                 d = None
         else:
             if d is not None:
-                d[2] = k
-                unit.append(d[: 3 + 3 * k])
+                d[2] = m
+                unit.append(d[: 3 + 3 * m])
                 d = None
             f = bytearray(12)
             f[1] = 0x02
             v = dt + (i * 1000) // hz
             f[2:5] = bytes((v & 0xFF, (v >> 8) & 0xFF, (v >> 16) & 0xFF))
             f[5] = hz
-            for j, c in enumerate((sx, sy, sz)):
-                f[6 + 2 * j], f[7 + 2 * j] = c & 0xFF, (c >> 8) & 0xFF
+            for jj, c in enumerate((sx, sy, sz)):
+                f[6 + 2 * jj], f[7 + 2 * jj] = c & 0xFF, (c >> 8) & 0xFF
             unit.append(f)
         prev = (sx, sy, sz)
     if d is not None:
-        d[2] = k
-        unit.append(d[: 3 + 3 * k])
-    return unit
+        d[2] = m
+        unit.append(d[: 3 + 3 * m])
+    return unit, pts
+
+
+def watch_json(root, budget: int) -> str:
+    """JsonJob.step(budget) called until done (explicit stack, resumable at any value)."""
+    out: list[str] = []
+    stack: list[list] = []
+
+    def scalar(v) -> str:
+        if v is None:
+            return "null"
+        if isinstance(v, bool):
+            return "true" if v else "false"
+        if isinstance(v, int):
+            return str(v)
+        if isinstance(v, float):
+            return watch_json_num(v)
+        return json.dumps(v, ensure_ascii=False)
+
+    def open_(v) -> None:
+        if isinstance(v, list):
+            out.append("["); stack.append([v, None, 0])
+        elif isinstance(v, dict):
+            out.append("{"); stack.append([v, list(v.keys()), 0])
+        else:
+            out.append(scalar(v))
+
+    open_(root)
+    steps = 0
+    while stack:
+        steps += 1
+        b = budget
+        while b > 0 and stack:
+            c, keys, i = stack[-1]
+            n = len(keys) if keys is not None else len(c)
+            if i >= n:
+                out.append("}" if keys is not None else "]"); stack.pop(); continue
+            if i > 0:
+                out.append(",")
+            if keys is not None:
+                out.append(json.dumps(str(keys[i]), ensure_ascii=False) + ":"); v = c[keys[i]]
+            else:
+                v = c[i]
+            stack[-1][2] = i + 1
+            open_(v)
+            b -= 1
+    return "".join(out)
 
 
 def watch_sync(sync_ms: int, session: int) -> bytearray:
@@ -358,13 +417,14 @@ def test_ble_frames() -> None:
     for i in range(50):   # two 1-s callbacks at 25 Hz, with one jump that forces a keyframe
         p = (p[0] + int(rng.integers(-60, 60)), p[1] + int(rng.integers(-60, 60)), p[2] + (300 if i == 37 else 0))
         xyz.append(p)
-    stream = [watch_sync(sync_ms, 1760630400)] + watch_unit(t0, sync_ms, xyz[:25], 1) + watch_unit(t0 + 1000, sync_ms, xyz[25:], 1)
+    stream = [watch_sync(sync_ms, 1760630400)] + watch_unit(t0, sync_ms, xyz[:25], 1)[0] + watch_unit(t0 + 1000, sync_ms, xyz[25:], 1)[0]
     bat = bytearray(b"\0\x07") + bytes((64, 23))
     tok = "pulso_dev_" + "y" * 43
     batch = {"v": 1, "d": "fr255-cap-a1b2c3", "q": 11, "src": "cap", "t": 1760630461,
              "rr": [[t0 + 900, [812, 820]]], "bat": [1760630460, float(watch_json_num(63.5)), None],
              "ev": [[1760630400, "mark", "reunião começou"]]}
-    body = json.dumps(batch, ensure_ascii=False, separators=(",", ":")).encode()
+    body = watch_json(batch, budget=3).encode()
+    ok_job = json.loads(body) == batch and watch_json(batch, budget=1) == watch_json(batch, budget=10_000)
     blob = watch_blob(11, body, tok)
     # BleLink.pump alternates blob / stream frames and writes seq at send time
     order, si, bi, turn = [], 0, 0, False
@@ -391,11 +451,24 @@ def test_ble_frames() -> None:
         conn.commit()
         st = P.handle_blob(P.local_sink(db), *done[0][:3], log=lambda m: None) if len(done) == 1 else -1
     ok_blob = not failed and st == FR.BLOB_OK
+    # MAX mode at 100 Hz: averaged down to the bridge hint (25 Hz) before framing
+    rng2 = np.random.default_rng(5)
+    raw100 = [(int(v[0]), int(v[1]), int(v[2])) for v in rng2.integers(-900, 900, size=(100, 3))]
+    u100, pts25 = watch_unit(t0, sync_ms, raw100, 1)
+    dec2 = FR.Decoder()
+    for i, f in enumerate([watch_sync(sync_ms, 1)] + u100):
+        f = bytearray(f); f[0] = i & 0xFF
+        dec2.feed(bytes(f))
+    o2 = dec2.take()
+    got25 = [x for _, _, ss in o2.accel for x in ss]
+    ok_avg = (len(pts25) == 25 and got25 == pts25 and all(hz == 25.0 for _, hz, _ in o2.accel)
+              and pts25[0] == tuple(int(np.trunc(np.mean([p[c] for p in raw100[:4]]))) for c in range(3)))
     nums = [watch_json_num(v) for v in (64.0, 63.5, 0.1, -0.00001, 12.34567)]
     ok_num = nums == ["64", "63.5", "0.1", "-0", "12.3457"] and all(json.loads(x) is not None for x in nums)
-    check("ble_frames", same_types and same_uuids and ok_stream and ok_blob and ok_num,
+    check("ble_frames", same_types and same_uuids and ok_stream and ok_blob and ok_num and ok_job and ok_avg,
           f"types={same_types} uuids={same_uuids} stream={ok_stream} ({len(samples)} samples, "
-          f"{len(order)} frames) blob={ok_blob} json_num={nums}")
+          f"{len(order)} frames) avg100to25={ok_avg} ({len(u100)} frames) json_job={ok_job} blob={ok_blob} "
+          f"json_num={nums}")
 
 
 if __name__ == "__main__":

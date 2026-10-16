@@ -77,9 +77,14 @@ class HttpCall {
 
 //! An upload-queue batch over the BLE bridge (BleLink): JSON bytes + HMAC, acknowledged by the
 //! bridge only once stored. Used by the uploader's router when the phone is away or the batch is
-//! too big for the phone route.
+//! too big for the phone route. The JSON is encoded a few hundred values per tick (JsonJob).
 class BleTransport extends Transport {
+    const STEP = 300;   // values per tick, well inside the FR255 watchdog budget
+
     private var _link as BleLink;
+    private var _job as JsonJob or Null = null;
+    private var _jobQ as Number = 0;
+    private var _jobCb as SendCallback or Null = null;
 
     function initialize(link as BleLink) {
         Transport.initialize();
@@ -96,18 +101,43 @@ class BleTransport extends Transport {
     }
 
     function send(batch as Dictionary<String, Object>, cb as SendCallback) as Void {
-        var bytes;
-        try {
-            bytes = Json.encode(batch);
-        } catch (e) {
+        var q = batch["q"];
+        if (!(q instanceof Number)) {
             cb.invoke(Communications.INVALID_HTTP_BODY_IN_REQUEST, null);
             return;
         }
-        var q = batch["q"];
-        if (bytes.size() > 65535 || !(q instanceof Number)) {
+        _job = new JsonJob(batch);   // a newer attempt replaces an unfinished one (its cb is moot)
+        _jobQ = q;
+        _jobCb = cb;
+        tick();
+    }
+
+    //! Called every second by the uploader: continue encoding, hand the bytes to the link.
+    function tick() as Void {
+        var job = _job;
+        var cb = _jobCb;
+        if (job == null || cb == null) {
+            return;
+        }
+        var done = false;
+        try {
+            done = job.step(STEP);
+        } catch (e) {
+            _job = null;
+            _jobCb = null;
+            cb.invoke(Communications.INVALID_HTTP_BODY_IN_REQUEST, null);
+            return;
+        }
+        if (!done) {
+            return;
+        }
+        _job = null;
+        _jobCb = null;
+        var bytes = job.bytes();
+        if (bytes.size() > 65535) {
             cb.invoke(413, null);
             return;
         }
-        _link.sendBlob(q, bytes, cb);
+        _link.sendBlob(_jobQ, bytes, cb);
     }
 }
