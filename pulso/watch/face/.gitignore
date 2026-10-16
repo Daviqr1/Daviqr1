@@ -1,0 +1,10 @@
+# sideload config with the real URL/token (tools/bake_config.py)
+config/local/
+local.jungle
+# build outputs and keys
+bin/
+*.prg
+*.prg.debug.xml
+*.iq
+*.der
+*.pem

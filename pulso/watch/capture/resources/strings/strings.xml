@@ -29,7 +29,6 @@
 
     <!-- status screen -->
     <string id="PressStart">START para iniciar</string>
-    <string id="Recording">gravando</string>
     <string id="Queue">fila</string>
     <string id="NoCentral">configure a central</string>
     <string id="NoPhone">sem celular</string>
@@ -38,7 +37,6 @@
     <string id="LinkOk">ok há</string>
     <string id="LinkIdle">nada enviado</string>
     <string id="LinkErr">erro</string>
-    <string id="Quality">RR</string>
     <string id="Aerobic">AERÓBIO</string>
     <string id="Transition">TRANSIÇÃO</string>
     <string id="Anaerobic">ANAERÓBIO</string>

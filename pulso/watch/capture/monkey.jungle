@@ -1,1 +1,5 @@
 project.manifest = manifest.xml
+
+# Optional, git-ignored: local/properties.xml overrides the defaults in resources/properties.xml
+# (central URL and device token for sideloaded builds, which Garmin Connect cannot configure).
+base.resourcePath = $(base.resourcePath);local

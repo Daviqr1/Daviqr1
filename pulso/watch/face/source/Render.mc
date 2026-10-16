@@ -140,6 +140,9 @@ class Painter {
 
     //! Pre-render the calm->tense gradient once, Bayer-dithered between neighbouring palette steps.
     private function makeGauge() as Graphics.BufferedBitmap? {
+        if (!(Graphics has :createBufferedBitmap)) {
+            return null;
+        }
         var bmp = null;
         try {
             var ref = Graphics.createBufferedBitmap({:width => GAUGE_W, :height => GAUGE_H});
@@ -178,15 +181,18 @@ class Painter {
             dc.setAntiAlias(true);
         }
         var tz = ct.timeZoneOffset;
+        var configured = Cfg.configured();
+        // central values that are not "now" (sleep, HRV, peaks, insight) expire after 36 h
+        var f = m.faceUsable(now) ? m.face : null;
         drawRing(dc, m, now, tz);
         drawDate(dc);
         drawTime(dc, ct);
         var central = drawAgora(dc, m, now);
-        drawGrid(dc, m, now, central);
+        drawGrid(dc, m, f, central);
         drawMeeting(dc, m, now, ct);
-        drawPeak(dc, m, now);
-        drawMsg(dc, m);
-        drawStatus(dc, m, now);
+        drawPeak(dc, m, f, now, tz);
+        drawMsg(dc, f, configured);
+        drawStatus(dc, m, now, configured);
     }
 
     //! Seconds next to the time (low cost: one fill + one glyph pair inside a tight clip).
@@ -296,10 +302,10 @@ class Painter {
         var col = Pal.GREY;
         var suffix = "";
         var extra = "";
-        var frac = -1.0;
+        var frac = -1.0;   // gauge marker position 0..1, < 0 = no marker
         if (central) {
             var z = az as Float;
-            val = (z >= 0 ? "+" : "") + z.format("%.1f");
+            val = Fmt.signed1(z);
             col = Pal.heatZ(z);
             suffix = "z";
             var ahr = m.ahr();
@@ -307,6 +313,7 @@ class Painter {
                 extra = (ahr >= 0 ? "+" : "") + ahr.toString() + "bpm";
             }
             frac = (z + 3.0) / 6.0;
+            frac = frac < 0.0 ? 0.0 : frac;
         } else {
             var s = m.stressNow();
             if (s != null) {
@@ -378,7 +385,7 @@ class Painter {
         dc.drawText(x + ICON_W + 2, yy, _fSmall, val, Graphics.TEXT_JUSTIFY_LEFT);
     }
 
-    private function drawGrid(dc as Graphics.Dc, m as Model, now as Number, central as Boolean) as Void {
+    private function drawGrid(dc as Graphics.Dc, m as Model, f as Dictionary?, central as Boolean) as Void {
         var dx = (26 * _s).toNumber();
         var x0 = _cx - 3 * dx;
         var x1 = _cx - dx;
@@ -395,7 +402,6 @@ class Painter {
         var rec = m.recoveryMin();
         cell(dc, x3, y1, "c", (rec != null && rec > 24 * 60) ? Pal.WARN : Pal.GREY, rec == null ? "--" : Fmt.recovery(rec), Pal.WHITE);
 
-        var f = m.face;
         var hrv = J.num(f, "hrv");
         var hrvs = J.str(f, "hrvs");
         var hcol = Pal.GREY;
@@ -457,7 +463,8 @@ class Painter {
         var tm = tStr != null ? tStr : "";
         var yy = y(Y_MEET);
         var font = fits(title) ? _fSmall : Graphics.FONT_XTINY;
-        var wt = dc.getTextWidthInPixels(tm + " ", _fSmall);
+        var tfont = fits(tm) ? _fSmall : Graphics.FONT_XTINY;   // complication time is locale-formatted
+        var wt = dc.getTextWidthInPixels(tm + " ", tfont);
         var wd = risk != null ? 3 * ICON_W + 4 : 0;
         var maxTitle = (200 * _s).toNumber() - ICON_W - 3 - wt - wd;
         title = ellipsize(dc, title, font, maxTitle);
@@ -468,7 +475,7 @@ class Painter {
         x += ICON_W + 3;
         var mins = Fmt.minutesUntil(tStr, ct);
         dc.setColor((mins != null && mins <= 15) ? Pal.WARN : Pal.WHITE, Graphics.COLOR_TRANSPARENT);
-        dc.drawText(x, yy, _fSmall, tm, Graphics.TEXT_JUSTIFY_LEFT);
+        dc.drawText(x, yy, tfont, tm, Graphics.TEXT_JUSTIFY_LEFT);
         x += wt;
         dc.setColor(Pal.WHITE, Graphics.COLOR_TRANSPARENT);
         dc.drawText(x, yy, font, title, Graphics.TEXT_JUSTIFY_LEFT);
@@ -486,11 +493,11 @@ class Painter {
 
     // ---- last stress peak of the day -----------------------------------------------------------------
 
-    private function drawPeak(dc as Graphics.Dc, m as Model, now as Number) as Void {
-        if (m.faceT <= 0 || now - m.faceT > 12 * 3600) {
+    //! Episodes are "today" on the central: only shown when face.t is on today's local date.
+    private function drawPeak(dc as Graphics.Dc, m as Model, f as Dictionary?, now as Number, tz as Number) as Void {
+        if (f == null || (m.faceT + tz) / 86400 != (now + tz) / 86400) {
             return;
         }
-        var f = m.face;
         var ep = J.num(f, "ep");
         if (ep == null) {
             return;
@@ -522,11 +529,11 @@ class Painter {
 
     // ---- insight (2 lines, word-wrapped to the round screen) ----------------------------------------
 
-    private function drawMsg(dc as Graphics.Dc, m as Model) as Void {
-        var msg = J.str(m.face, "msg");
+    private function drawMsg(dc as Graphics.Dc, f as Dictionary?, configured as Boolean) as Void {
+        var msg = J.str(f, "msg");
         var col = Pal.MSG;
         if (msg == null) {
-            if (Cfg.configured()) {
+            if (configured) {
                 return;
             }
             msg = _lHint;
@@ -544,7 +551,7 @@ class Painter {
 
     // ---- staleness + link status ----------------------------------------------------------------------
 
-    private function drawStatus(dc as Graphics.Dc, m as Model, now as Number) as Void {
+    private function drawStatus(dc as Graphics.Dc, m as Model, now as Number, configured as Boolean) as Void {
         var age = "--";
         var acol = Pal.DGREY;
         if (m.faceT > 0) {
@@ -555,7 +562,7 @@ class Painter {
         var link;
         var lcol;
         var code = m.stCode;
-        if (!Cfg.configured()) {
+        if (!configured) {
             link = _sConfig;
             lcol = Pal.WARN;
         } else if (!Cfg.flag("uploadEnabled", true)) {
@@ -679,16 +686,14 @@ class Painter {
             lines.add(cur);
             cur = "";
         }
-        if (lines.size() > 0) {
-            var li = lines.size() - 1;
+        // a single over-long word can still overflow a line; the last line also absorbs what is left
+        for (var li = 0; li < lines.size(); li++) {
             var maxW = li == 0 ? w1 : w2;
-            var last = lines[li];
-            if (k < words.size()) {
-                last = ellipsize(dc, last + " " + words[k], font, maxW);
-            } else {
-                last = ellipsize(dc, last, font, maxW);
+            var ln = lines[li];
+            if (li == lines.size() - 1 && k < words.size()) {
+                ln = ln + " " + words[k];
             }
-            lines[li] = last;
+            lines[li] = ellipsize(dc, ln, font, maxW);
         }
         return lines;
     }
@@ -698,6 +703,12 @@ class Painter {
 module Fmt {
     function n(v as Number?) as String {
         return v == null ? "--" : v.toString();
+    }
+
+    //! 1.44 -> "+1,4", -0.3 -> "-0,3" (decimal comma)
+    function signed1(z as Float) as String {
+        var t = (Math.round(z * 10).toNumber()).abs();
+        return (z < -0.05 ? "-" : "+") + (t / 10).toString() + "," + (t % 10).toString();
     }
 
     //! 432 -> "7h12", 45 -> "45m"

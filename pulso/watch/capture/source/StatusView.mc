@@ -52,7 +52,6 @@ class StatusView extends WatchUi.View {
         _s[:details] = WatchUi.loadResource(Rez.Strings.Details) as String;
         _s[:sent] = WatchUi.loadResource(Rez.Strings.Sent) as String;
         _s[:dropped] = WatchUi.loadResource(Rez.Strings.Dropped) as String;
-        _s[:rec] = WatchUi.loadResource(Rez.Strings.Recording) as String;
         _s[:foco] = WatchUi.loadResource(Rez.Strings.ModeFoco) as String;
         _s[:sono] = WatchUi.loadResource(Rez.Strings.ModeSono) as String;
         _s[:treino] = WatchUi.loadResource(Rez.Strings.ModeTreino) as String;
@@ -95,7 +94,7 @@ class StatusView extends WatchUi.View {
 
         // big numbers: HR | RMSSD or alpha1
         var numF = Graphics.FONT_NUMBER_MEDIUM;
-        var y0 = 74;
+        var y0 = 70;
         var hr = cap.hr;
         dc.setColor(Ui.HR, Graphics.COLOR_TRANSPARENT);
         dc.drawText(cx - 56, y0, numF, (hr != null) ? hr.toString() : "--", Graphics.TEXT_JUSTIFY_CENTER);
@@ -108,12 +107,16 @@ class StatusView extends WatchUi.View {
         var right = "--";
         var label = "RMSSD ms";
         var color = Ui.HRV;
+        var labelColor = Ui.DIM;
         if (dfa) {
             var a = hrv.alpha1;
             label = "α1";
             if (a != null && hrv.fresh()) {
+                var z = HrvLive.zone(a);
                 right = a.format("%.2f");
-                color = zoneColor(HrvLive.zone(a));
+                color = zoneColor(z);
+                labelColor = color;
+                label = "α1 " + zoneName(z);
             } else if (hrv.dfaBeats() < hrv.dfaWindow()) {
                 label = "α1 " + hrv.dfaBeats().toString() + "/" + hrv.dfaWindow().toString();
             }
@@ -125,7 +128,7 @@ class StatusView extends WatchUi.View {
         }
         dc.setColor(color, Graphics.COLOR_TRANSPARENT);
         dc.drawText(cx + 56, y0, numF, right, Graphics.TEXT_JUSTIFY_CENTER);
-        dc.setColor(Ui.DIM, Graphics.COLOR_TRANSPARENT);
+        dc.setColor(labelColor, Graphics.COLOR_TRANSPARENT);
         dc.drawText(cx + 56, yl, xt, label, Graphics.TEXT_JUSTIFY_CENTER);
 
         y = yl + xtH + 4;
@@ -241,7 +244,8 @@ class StatusView extends WatchUi.View {
         dc.drawText(cx, y, f, txt, Graphics.TEXT_JUSTIFY_CENTER);
     }
 
-    //! alpha1 scale 0.25..1.25 with the < 0.5 / 0.5-0.75 / >= 0.75 zones. Returns next y.
+    //! alpha1 scale 0.25..1.25 with the < 0.5 / 0.5-0.75 / >= 0.75 zones and a marker at the
+    //! current value. Returns the next free y.
     private function drawZoneBar(dc as Graphics.Dc, cx as Number, y as Number, a as Float or Null) as Number {
         var x0 = cx - 70;
         var bw = 140;
@@ -255,20 +259,18 @@ class StatusView extends WatchUi.View {
         dc.fillRectangle(x50, y, x75 - x50, 5);
         dc.setColor(Ui.OK, Graphics.COLOR_TRANSPARENT);
         dc.fillRectangle(x75, y, x0 + bw - x75, 5);
-        var z = HrvLive.zone(a);
         if (a != null) {
             var v = (a < lo) ? lo : ((a > hi) ? hi : a);
             var mx = x0 + ((v - lo) / (hi - lo) * bw).toNumber();
             dc.setColor(Ui.FG, Graphics.COLOR_TRANSPARENT);
             dc.fillRectangle(mx - 1, y - 3, 3, 11);
         }
-        y += 9;
+        return y + 11;
+    }
+
+    private function zoneName(z as Number) as String {
         var t = (z == 0) ? _s[:aer] : ((z == 1) ? _s[:tra] : ((z == 2) ? _s[:ana] : null));
-        if (t != null) {
-            dc.setColor(zoneColor(z), Graphics.COLOR_TRANSPARENT);
-            dc.drawText(cx, y, Graphics.FONT_XTINY, t, Graphics.TEXT_JUSTIFY_CENTER);
-        }
-        return y + dc.getFontHeight(Graphics.FONT_XTINY);
+        return (t != null) ? t : "";
     }
 
     private function drawBattery(dc as Graphics.Dc, cx as Number, y as Number) as Void {

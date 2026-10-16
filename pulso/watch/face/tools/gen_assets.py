@@ -60,9 +60,10 @@ def make_icon(path: Path, size: int = 40) -> None:
     ring = [(0x00, 0x55, 0xFF), (0x00, 0xAA, 0xFF), (0x00, 0xFF, 0xAA), (0x55, 0xFF, 0x55),
             (0xFF, 0xFF, 0x00), (0xFF, 0xAA, 0x00), (0xFF, 0x55, 0x00), (0xFF, 0x00, 0x00)]
     c = (size - 1) / 2.0
-    # pulse polyline in unit coordinates (x 0..1, y -1..1)
-    pulse = [(0.12, 0), (0.36, 0), (0.44, -0.55), (0.52, 0.75), (0.60, -0.25), (0.66, 0), (0.88, 0)]
-    pts = [(c - size * 0.30 + p[0] * size * 0.60, c + p[1] * size * 0.22) for p in pulse]
+    # ECG trace in a 40-unit grid (scaled to `size`): P wave, QRS spike, T wave
+    trace = [(8, 21), (13, 21), (15, 18.5), (17, 21), (19, 21), (21.5, 8), (24.5, 31), (26.5, 21),
+             (28.5, 21), (30.5, 18), (32.5, 21)]
+    pts = [(x * size / 40.0, y * size / 40.0) for x, y in trace]
 
     def dist_to_polyline(x: float, y: float) -> float:
         best = 1e9
@@ -85,7 +86,7 @@ def make_icon(path: Path, size: int = 40) -> None:
                 col = ring[min(7, int(ang / 45))]
                 if int(ang) % 45 < 4:      # small gaps between segments
                     col = (0, 0, 0)
-            if dist_to_polyline(x, y) < 1.6:
+            if dist_to_polyline(x, y) < 1.15:
                 col = (0xFF, 0xFF, 0xFF)
             px.append((snap(col[0]), snap(col[1]), snap(col[2]), 255))
     write_png(path, size, size, px)

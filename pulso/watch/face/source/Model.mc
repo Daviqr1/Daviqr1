@@ -5,9 +5,7 @@ import Toybox.SensorHistory;
 import Toybox.System;
 import Toybox.Time;
 
-//! Everything the face shows, gathered from: the central's `face` object (Storage), the last
-//! upload status, complications, ActivityMonitor, SensorHistory and a local stress accumulator.
-//! Every source can be missing; getters return null and the renderer shows "--".
+//! Freshness limits and ring modes.
 module Lim {
     const RING_NONE = 0;
     const RING_CENTRAL = 1;       // face.tr, activation -9..9 per hour
@@ -16,13 +14,15 @@ module Lim {
     const RING_MAX_AGE_S = 10800; // face.tr / face.nm older than 3 h are not shown
 }
 
+//! Everything the face shows, gathered from: the central's `face` object (Storage), the last
+//! upload status, complications, ActivityMonitor, SensorHistory and a local stress accumulator.
+//! Every source can be missing; getters return null and the renderer shows "--".
 class Model {
     // central state
     var face as Dictionary? = null;
     var faceT as Number = 0;
     // last upload status
     var stCode as Number? = null;
-    var stT as Number = 0;
     var stPending as Number = 0;
     // complications (null = not subscribed / no value)
     var cBB as Number? = null;
@@ -59,8 +59,6 @@ class Model {
         var st = Store.get(K.ST);
         if (st instanceof Array && st.size() >= 4) {
             stCode = J.toNum(st[0]);
-            var stt = J.toNum(st[1]);
-            stT = stt != null ? stt : 0;
             var n = J.toNum(st[3]);
             stPending = n != null ? n : 0;
         }
@@ -254,10 +252,10 @@ class Model {
                 while (s != null) {
                     var d = s.data;
                     var w = s.when;
-                    if (d != null && w != null) {
+                    if (d != null && w != null && w.value() >= ringT0) {
                         var i = (w.value() - ringT0) / 3600;
                         var v = d.toNumber();
-                        if (i >= 0 && i < 12 && v >= 0 && v <= 100) {
+                        if (i < 12 && v >= 0 && v <= 100) {
                             sums[i] = (sums[i] as Number) + v;
                             cnts[i] = (cnts[i] as Number) + 1;
                         }

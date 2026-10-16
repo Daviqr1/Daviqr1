@@ -10,7 +10,10 @@ module GovAct {
 //! Battery governor. Samples the battery every 5 min, estimates drain (%/h) as an EMA of the
 //! slope over a sliding window of up to 1 h (battery % is coarse, a 5-min delta alone is mostly
 //! quantisation noise) and steps the capture down/up against the mode's budget with
-//! hysteresis. Below the floor it asks the controller to stop and save.
+//! hysteresis. It remembers the drain measured at the level it left, and does not climb back
+//! to a level that was over budget less than 3 h ago (simulated with 1 %-quantised readings:
+//! 5 instead of 12 level changes in 8 h, average drain at the budget instead of 13 % above).
+//! Below the floor it asks the controller to stop and save.
 //!   level 0 preset | 1 period 4 s, uploads x2 | 2 accel 10 Hz, uploads x3 | 3 accel off, uploads x4
 class Governor {
     const SAMPLE_S = 300;
@@ -21,6 +24,7 @@ class Governor {
     const ALPHA = 0.5;
     const UP = 1.2;               // step down when drain > budget * UP
     const DOWN = 0.7;             // restore when drain < budget * DOWN
+    const MEMORY_S = 10800;       // how long a level's measured drain is trusted
 
     private var _t as Array<Number>;
     private var _b as Array<Float>;
@@ -28,6 +32,8 @@ class Governor {
     private var _i as Number = 0;
     private var _lastSampleS as Number = 0;
     private var _lastChangeS as Number = 0;
+    private var _lvlDrain as Array<Float>;     // drain measured when a level was left (-1 = unknown)
+    private var _lvlDrainS as Array<Number>;
 
     var level as Number = 0;
     var drain as Float or Null = null;
@@ -44,6 +50,8 @@ class Governor {
             _t[k] = 0;
             _b[k] = 0.0;
         }
+        _lvlDrain = [-1.0, -1.0, -1.0, -1.0] as Array<Float>;
+        _lvlDrainS = [0, 0, 0, 0] as Array<Number>;
         read();
     }
 
@@ -56,6 +64,9 @@ class Governor {
         _i = 0;
         _lastSampleS = 0;
         _lastChangeS = nowS;
+        for (var k = 0; k < _lvlDrain.size(); k++) {
+            _lvlDrain[k] = -1.0;
+        }
     }
 
     //! Refresh battery fields (cheap; also used by the idle screen).
@@ -111,8 +122,14 @@ class Governor {
             return GovAct.NONE;
         }
         if (dr > budget * UP && level < Cfg.GOV_MAX_LEVEL) {
+            _lvlDrain[level] = dr;
+            _lvlDrainS[level] = nowS;
             level++;
         } else if (dr < budget * DOWN && level > 0) {
+            var known = _lvlDrain[level - 1];
+            if (known >= 0.0 && nowS - _lvlDrainS[level - 1] < MEMORY_S && known > budget * UP) {
+                return GovAct.NONE;   // that level was measured over budget recently
+            }
             level--;
         } else {
             return GovAct.NONE;

@@ -1,0 +1,5 @@
+# per-developer build-time settings (central URL, device token): never commit
+local/
+bin/
+*.prg
+*.prg.debug.xml

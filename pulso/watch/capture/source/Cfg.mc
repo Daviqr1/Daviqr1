@@ -114,12 +114,17 @@ module Cfg {
         return bool("fitEnabled", true);
     }
 
-    //! Battery budget in %/h; 0 disables the governor (floor still applies).
+    //! Battery budget in %/h; 0 disables the governor (the floor still applies).
+    //! FOCO: budgetPctH. SONO: sleepBudgetPctH. TREINO: 2 x budgetPctH (short, intentional
+    //! sessions with a strap and FIT). MAX: no budget, only the floor.
     function budget(mode as Number) as Float {
         if (mode == MODE_MAX) {
             return 0.0;
         }
         var b = (mode == MODE_SONO) ? flt("sleepBudgetPctH", 1.0) : flt("budgetPctH", 3.0);
+        if (mode == MODE_TREINO) {
+            b = b * 2.0;
+        }
         return (b < 0.0) ? 0.0 : b;
     }
 

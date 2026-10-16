@@ -72,10 +72,14 @@ class HttpTransport extends Transport {
 }
 
 //! Direct BLE link to the Pulso bridge (laptop/ESP32), for raw accelerometer at full rate.
-//! TODO(docs/ponte-ble.md): implement with Toybox.BluetoothLowEnergy once the bridge GATT
-//! service is specified there (service/characteristic UUIDs, framing, ack). Needs the
-//! BluetoothLowEnergy permission and a pairing/scan flow. Until then it reports unavailable
-//! and the uploader never selects it.
+//! TODO(docs/ponte-ble.md): implement with Toybox.BluetoothLowEnergy (watch = central):
+//! scan for service 6c1e0001-5b7a-4d6e-9f2a-50554c534f31, write <= 20-byte frames to DATA
+//! (6c1e0002-...) one operation at a time, read acks/suggested accel rate from CTRL
+//! (6c1e0003-..., notify). Frame layout and the reference codec: central/pulso/bridge/frames.py.
+//! MARK codes there are 1..4 = Capture.MARKS[0..3]; "pausa" (index 4) needs code 5 added.
+//! Needs the BluetoothLowEnergy permission and a "Ponte BLE" mode. This transport carries the
+//! live stream, not the queued JSON batches; until it exists it reports unavailable and the
+//! uploader never selects it.
 class BleTransport extends Transport {
     function initialize() {
         Transport.initialize();

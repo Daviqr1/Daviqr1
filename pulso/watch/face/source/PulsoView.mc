@@ -17,8 +17,8 @@ class PulsoView extends WatchUi.WatchFace {
     private var _awake as Boolean = true;
     private var _partialOk as Boolean = true;
     private var _showSec as Boolean = true;
-    private var _secAllowed as Boolean = true;
-    private var _saver as Boolean = true;   // battery governor, refreshed once per onUpdate
+    private var _secAllowed as Boolean = true;   // seconds allowed now (setting + battery), per onUpdate
+    private var _saver as Boolean = true;        // "batterySaver" setting
     private var _subscribed as Boolean = false;
 
     function initialize() {

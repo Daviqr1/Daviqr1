@@ -10,11 +10,14 @@ import Toybox.Time;
 import Toybox.UserProfile;
 
 //! Builds protocol-v1 batches from SensorHistory / ActivityMonitor (docs/protocolo.md).
-//! Request budget from the background: <= ~3 KB of JSON. Worst case (a full 60-min catch-up):
-//! hr 61 + stress 21 + bb 21 + spo2/temp/press/elev 13 each = 155 points * ~17 B + ~250 B ~= 2.9 KB.
+//! Request budget from the background: <= ~3 KB of JSON. A full 60-min catch-up could reach
+//! hr 61 + stress 21 + bb 21 + spo2/temp/press/elev 13 each = 155 points (~2.9 KB), so the batch
+//! is capped at MAX_POINTS (~2.6 KB): the newest points are dropped and, because cursors only
+//! advance to what was sent, they go out in the next run.
 (:background)
 module Harvest {
     const LOOKBACK_S = 3600;   // never read more than the last 60 min (iterator memory in 64 KB)
+    const MAX_POINTS = 140;
 
     //! Returns [batch, windowStarts]; windowStarts[k] is the epoch after which this batch carries
     //! every point of series k (used to de-duplicate older batches still in the outbox).
@@ -23,7 +26,7 @@ module Harvest {
         var h = {} as Dictionary<String, Array>;
         var win = {} as Dictionary<String, Number>;
         if (Toybox has :SensorHistory) {
-            //      key       spacing max  lo      hi      decimals
+            //                       key   min spacing s, max points, valid range, 1 decimal
             series(h, win, cur, now, "hr", 60, 61, 25, 230, false);
             series(h, win, cur, now, "stress", 180, 21, 0, 100, false);
             series(h, win, cur, now, "bb", 180, 21, 0, 100, false);
@@ -31,6 +34,7 @@ module Harvest {
             series(h, win, cur, now, "temp", 300, 13, -20, 60, true);
             series(h, win, cur, now, "press", 300, 13, 30000, 110000, false);
             series(h, win, cur, now, "elev", 300, 13, -500, 9000, false);
+            cap(h, win);
         }
         var b = {
             "v" => 1,
@@ -83,6 +87,33 @@ module Harvest {
         }
         if (pts.size() > 0) {
             h[key] = pts;
+        }
+        if (pts.size() >= maxN) {
+            win.remove(key);   // truncated: this batch does not cover the whole window, keep older copies
+        }
+    }
+
+    //! Keep the batch under MAX_POINTS by dropping the newest points, HR first.
+    function cap(h as Dictionary<String, Array>, win as Dictionary<String, Number>) as Void {
+        var keys = ["hr", "stress", "bb", "temp", "press", "elev", "spo2"] as Array<String>;
+        var total = 0;
+        for (var i = 0; i < keys.size(); i++) {
+            var a = h[keys[i]];
+            total += a != null ? a.size() : 0;
+        }
+        for (var i = 0; i < keys.size() && total > MAX_POINTS; i++) {
+            var k = keys[i];
+            var a = h[k];
+            if (a == null || a.size() < 2) {
+                continue;
+            }
+            var cut = total - MAX_POINTS;
+            if (cut > a.size() - 1) {
+                cut = a.size() - 1;
+            }
+            h[k] = a.slice(0, a.size() - cut);
+            total -= cut;
+            win.remove(k);
         }
     }
 
@@ -230,6 +261,7 @@ class PulsoService extends System.ServiceDelegate {
     private var _fresh as Boolean = false;
     private var _face as Dictionary? = null;
     private var _q as Number = 0;
+    private var _status as Number? = null;   // result of the fresh batch: what the face reports
     private var _sent as Number = 0;
     private var _t0 as Number = 0;
 
@@ -343,6 +375,9 @@ class PulsoService extends System.ServiceDelegate {
         } else if (permanent(code)) {
             _obx = _obx.slice(1, null);
         }
+        if (_fresh) {
+            _status = code;
+        }
         _fresh = false;
         save();
         if (code == 200 && _obx.size() > 0 && _sent < MAX_REQUESTS
@@ -355,7 +390,9 @@ class PulsoService extends System.ServiceDelegate {
             _obx = _obx.slice(1, null);
             save();
         }
-        finish(code);
+        // a failed flush of an old batch must not hide that the fresh upload went through
+        var st = _status;
+        finish(st != null ? st : code);
     }
 
     //! 4xx that will not get better by retrying the same bytes (auth and URL errors are config
