@@ -150,8 +150,9 @@ class Model {
             return c;
         }
         try {
+            // a null deref is a fatal VM error that try/catch does not catch: check every handle
             var it = ActivityMonitor.getHeartRateHistory(1, true);
-            var s = it.next();
+            var s = it != null ? it.next() : null;
             if (s != null) {
                 var hr = s.heartRate;
                 if (hr != null && hr != ActivityMonitor.INVALID_HR_SAMPLE && hr > 0) {
@@ -170,7 +171,8 @@ class Model {
         }
         if ((Toybox has :SensorHistory) && (SensorHistory has :getBodyBatteryHistory)) {
             try {
-                var s = SensorHistory.getBodyBatteryHistory({:period => 1}).next();
+                var it = SensorHistory.getBodyBatteryHistory({:period => 1});
+                var s = it != null ? it.next() : null;
                 var d = s != null ? s.data : null;
                 if (d != null) {
                     var v = d.toNumber();
@@ -248,7 +250,7 @@ class Model {
                     :period => new Time.Duration(now - ringT0 + 60),
                     :order => SensorHistory.ORDER_OLDEST_FIRST
                 });
-                var s = it.next();
+                var s = it != null ? it.next() : null;
                 while (s != null) {
                     var d = s.data;
                     var w = s.when;

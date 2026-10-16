@@ -13,15 +13,37 @@ module Link {
     const NOCFG = 6;
 }
 
+//! One send attempt. The callback carries its own attempt id and q, so a late answer to an
+//! attempt the uploader already gave up on (STUCK_MS) is never credited to another batch.
+class UploadCall {
+    private var _up as Uploader;
+    private var _id as Number;
+    private var _q as Number;
+
+    function initialize(up as Uploader, id as Number, q as Number) {
+        _up = up;
+        _id = id;
+        _q = q;
+    }
+
+    function onResult(code as Number, data as Dictionary or Null) as Void {
+        _up.onResult(_id, _q, code, data);
+    }
+}
+
 //! Drains the UploadQueue through a Transport: one request in flight, oldest batch first,
 //! back-to-back while it succeeds, exponential backoff on errors (longer without a phone).
+//! A batch is only ever dropped for errors that are about the batch itself; link, server
+//! availability and configuration errors (no phone, timeouts, 404, 502-504, tunnel down) keep
+//! it queued however long they last.
 class Uploader {
     const STUCK_MS = 180000;      // the system always calls back; this only guards a lost callback
-    const GIVE_UP_TRIES = 8;      // per batch, for non-link errors (e.g. -402/-403, 5xx)
+    const GIVE_UP_TRIES = 8;      // per batch, for batch-specific errors (500/501, -402/-403)
 
     private var _queue as UploadQueue;
     private var _transport as Transport;
-    private var _inFlight as Number or Null = null;
+    private var _inFlight as Number or Null = null;   // q of the current attempt
+    private var _attempt as Number = 0;               // id of the current attempt
     private var _sentTimer as Number = 0;
     private var _wanted as Boolean = false;
     private var _retryAtS as Number = 0;
@@ -106,31 +128,42 @@ class Uploader {
             return;             // next tick continues
         }
         b["t"] = Time.now().value();
+        _attempt++;
+        var id = _attempt;
         _inFlight = q;
         _sentTimer = System.getTimer();
         status = Link.SENDING;
-        _transport.send(b, method(:onResult));
+        var call = new UploadCall(self, id, q);
+        _transport.send(b, call.method(:onResult) as SendCallback);
     }
 
-    function onResult(code as Number, data as Dictionary or Null) as Void {
-        var q = _inFlight;
-        _inFlight = null;
-        lastCode = code;
-        if (q == null) {
-            return;
+    //! Result of attempt `id` for batch q (called through UploadCall).
+    function onResult(id as Number, q as Number, code as Number, data as Dictionary or Null) as Void {
+        var current = _inFlight != null && id == _attempt;
+        var ok = code == 200 || code == 201;
+        if (!current && !ok) {
+            return;   // late error of an abandoned attempt: the batch is still queued
         }
+        if (current) {
+            _inFlight = null;
+        }
+        lastCode = code;
         var nowS = Time.now().value();
-        if (code == 200 || code == 201) {
+        if (ok) {
             if (data != null && data.get("dup") == 1) {
                 dups++;
             }
-            _queue.remove(q);
+            _queue.remove(q);   // no-op when a late duplicate answer arrives
             sent++;
             lastOkS = nowS;
-            status = Link.OK;
-            _streak = 0;
-            _failCount = 0;
-            pump();
+            if (_inFlight == null) {
+                status = Link.OK;
+                _streak = 0;
+                _failCount = 0;
+                _retryAtS = 0;
+                _wanted = true;
+                pump();
+            }
             return;
         }
         if (code == 400 || code == 413 || code == 422
@@ -144,7 +177,13 @@ class Uploader {
         }
         var linkDown = code == Communications.BLE_CONNECTION_UNAVAILABLE;
         var auth = code == 401 || code == 403;
-        if (!linkDown && !auth) {
+        // Only failures tied to this batch count towards giving it up. A server that is down,
+        // a tunnel with the laptop asleep (404/502/503/504/52x), timeouts and BLE errors are
+        // retried forever with backoff, otherwise a night without the central would drop data.
+        var batchFault = code == 500 || code == 501
+            || code == Communications.NETWORK_RESPONSE_TOO_LARGE
+            || code == Communications.NETWORK_RESPONSE_OUT_OF_MEMORY;
+        if (batchFault) {
             if (q == _failQ) {
                 _failCount++;
             } else {

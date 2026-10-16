@@ -28,7 +28,7 @@ Tela redonda 260×260, 64 cores (MIP). Mock aproximado:
 
 | Região | Conteúdo | Fonte do dado |
 |---|---|---|
-| Anel externo | 12 segmentos, cada um na posição do relógio da hora que representa (o traço branco marca "agora"). Cor: azul = mais calmo que o seu normal → verde = normal → amarelo/laranja/vermelho = tenso. Cinza fino = sem dado | `face.tr` da central (ativação −9..9 por hora). Sem central: estresse Garmin por hora (`SensorHistory.getStressHistory`, completado por um acumulador local do `stressScore`, porque no FR255 o histórico de estresse às vezes volta vazio) |
+| Anel externo | 12 segmentos, cada um na posição do relógio da hora que representa (o traço branco marca "agora"; o arco vazio entre o segmento mais novo e o traço é a idade do dado, e nada com mais de 12 h é desenhado). Cor: azul = mais calmo que o seu normal → verde = normal → amarelo/laranja/vermelho = tenso. Cinza fino = sem dado | `face.tr` da central (ativação −9..9 por hora). Sem central: estresse Garmin por hora (`SensorHistory.getStressHistory`, completado por um acumulador local do `stressScore`, porque no FR255 o histórico de estresse às vezes volta vazio) |
 | Topo | dia da semana, dia, mês | relógio |
 | Centro | hora (24 h ou 12 h conforme o relógio) + segundos pequenos | relógio |
 | "agora" | **ATIVAÇÃO** em z (desvios do seu normal, 1 casa) + FC adicional (bpm acima do que o movimento explica) quando o estado da central tem menos de 15 min. Senão **ESTRESSE** Garmin 0–100 (`ActivityMonitor.stressScore`, média móvel de 30 s) | `face.az`, `face.ahr` / relógio |
@@ -38,7 +38,7 @@ Tela redonda 260×260, 64 cores (MIP). Mock aproximado:
 | Reunião | próxima reunião "15:00 Título" + 0–3 pontos de carga prevista (verde→vermelho); horário fica laranja a ≤ 15 min. Sem central: horário do próximo evento do calendário | `face.nm` / complicação `CALENDAR_EVENTS` |
 | Picos | episódios de estresse de hoje, hora do último pico e o evento ligado a ele | `face.ep/pk/pl` |
 | Insight | frase curta do dia (até 2 linhas, com reticências) | `face.msg` |
-| Rodapé | idade do estado da central (verde < 15 min, laranja < 1 h, vermelho) · status do último envio: `ok`, `sem cel.`, `timeout`, `token?` (401/403), `config?`, `pausado`, `erro N`; `+N` = lotes na fila | `Storage` |
+| Rodapé | idade do estado da central (verde < 15 min, laranja < 1 h, vermelho) · status do último envio: `ok`, `sem cel.`, `sem resp.` (tempo esgotado), `token?` (401/403), `config?`, `pausado`, `erro N`; `+N` = lotes na fila | `Storage` |
 
 Valores ausentes aparecem como `--`. Dados da central que não são "agora" (sono, HRV, insight)
 somem depois de 36 h sem atualização; picos só aparecem se forem do dia de hoje.

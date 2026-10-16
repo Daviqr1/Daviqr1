@@ -109,12 +109,13 @@ module Cfg {
         if (u == null || u.find("https://") != 0 || u.find("example.") != null) {
             return null;
         }
-        if (u.find("/v1/ingest") != null) {
-            return u;
-        }
+        // trailing slashes first: ".../v1/ingest/" would get a 307 redirect, which a POST does not follow
         while (u.length() > 8 && "/".equals(u.substring(u.length() - 1, u.length()))) {
             var t = u.substring(0, u.length() - 1);
             u = t != null ? t : "";
+        }
+        if (u.find("/v1/ingest") != null) {
+            return u;
         }
         return u + "/v1/ingest";
     }

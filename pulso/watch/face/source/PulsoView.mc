@@ -59,7 +59,8 @@ class PulsoView extends WatchUi.WatchFace {
         var now = Time.now().value();
         var ct = System.getClockTime();
         _model.tick(now, ct.timeZoneOffset);
-        var key = (now / 60) * 1024 + (_model.version % 1024);
+        // minute * 1024 overflows a 32-bit Number; keep the minute part below 1e6
+        var key = ((now / 60) % 1000000) * 1024 + (_model.version % 1024);
         dc.clearClip();
         var buf = _buf;
         if (buf != null) {

@@ -250,7 +250,23 @@ def test_wire() -> None:
     check("wire", ok, f"ingest {n}, resend dup={r2['dup']}")
 
 
+# ---- Capture.harvestHistory size bound ---------------------------------------------------------------
+def test_history_size() -> None:
+    """Worst case of one harvest (3 series x HIST_MAX_POINTS, float values printed with 6 decimals)
+    alone in a fresh batch (harvestHistory seals the open batch first when it would not fit) must
+    stay under the 6 KB POST limit and pass the central validator."""
+    from pulso.ingest.protocol import Batch
+    hist_max_points, t0 = 60, 1760630400
+    h = {k: [[t0 + 180 * i, 100.0] for i in range(hist_max_points)] for k in ("stress", "bb", "spo2")}
+    batch = {"v": 1, "d": "fr255-cap-a1b2c3", "q": 99999, "src": "cap", "sid": f"c-{t0}", "h": h,
+             "bat": [t0, 100.0, 12.5], "m": {"t": t0, "stress": 100, "resp": 14, "steps": 25000, "rhr": 52},
+             "t": t0}
+    body = json.dumps(batch, separators=(",", ":")).replace("100.0", "100.000000").replace("12.5", "12.500000")
+    Batch.model_validate_json(body)
+    check("history_size", len(body) < 6144, f"worst-case harvest batch {len(body)} B (limit 6144)")
+
+
 if __name__ == "__main__":
-    for t in (test_dfa, test_enmo_mad, test_gate, test_rr_anchor, test_governor, test_wire):
+    for t in (test_dfa, test_enmo_mad, test_gate, test_rr_anchor, test_governor, test_wire, test_history_size):
         t()
     sys.exit(1 if FAILED else 0)

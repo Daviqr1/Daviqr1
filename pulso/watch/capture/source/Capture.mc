@@ -29,7 +29,7 @@ class Capture {
     const DFA_EVERY_S = 15;
     const HIST_EVERY_S = 600;
     const HIST_MAX_S = 7200;
-    const HIST_MAX_POINTS = 120;
+    const HIST_MAX_POINTS = 60;      // per series and harvest: 3 x 60 points stay ~3 KB of JSON
     const SONO_QUEUE_PUSH = 24000;   // in SONO upload early only when this much is queued
     const UI_SONO_S = 60;
 
@@ -71,6 +71,7 @@ class Capture {
     private var _lastUiS as Number = 0;
     private var _booted as Boolean = false;
     private var _histCursor as Dictionary<String, Number>;
+    private var _histDirty as Boolean = false;   // cursor advanced in memory, batch not sealed yet
 
     function initialize() {
         clock = new Clock();
@@ -311,6 +312,7 @@ class Capture {
                 return;
             }
         }
+        enmo = 0;   // no accelerometer from here on: do not keep the last value on screen / in FIT
         if (tryRegister(period, 0, 0)) {
             accHz = 0;
             return;
@@ -509,6 +511,12 @@ class Capture {
             _lastFlushS = nowS;
             sealNow();
             uploader.request(false);
+        } else if (builder.bytes >= Cfg.sealBytes(mode)) {
+            // normally sealed by onSensorData; this covers a listener that never registered
+            sealNow();
+            if (mode != Cfg.MODE_SONO) {
+                uploader.request(false);
+            }
         } else if (mode == Cfg.MODE_SONO && queue.bytes >= SONO_QUEUE_PUSH) {
             uploader.request(false);
         }
@@ -556,6 +564,14 @@ class Capture {
         b["m"] = snapshot(nowS);
         queue.push(q, b, builder.bytes);
         builder.reset();
+        if (_histDirty) {
+            // only now are the harvested points in the queue; a crash before this re-harvests them
+            _histDirty = false;
+            try {
+                Storage.setValue("hc", _histCursor as Storage.ValueType);
+            } catch (e) {
+            }
+        }
     }
 
     private function snapshot(nowS as Number) as Dictionary<String, Object> {
@@ -581,10 +597,12 @@ class Capture {
         } catch (e) {
         }
         try {
+            // averageRestingHeartRate is measured; restingHeartRate is the value typed into the
+            // user profile, so it is only a fallback (the central stores "rhr" as a measurement)
             var p = UserProfile.getProfile();
-            var rhr = (p has :restingHeartRate) ? p.restingHeartRate : null;
-            if (rhr == null && (p has :averageRestingHeartRate)) {
-                rhr = p.averageRestingHeartRate;
+            var rhr = (p has :averageRestingHeartRate) ? p.averageRestingHeartRate : null;
+            if (rhr == null && (p has :restingHeartRate)) {
+                rhr = p.restingHeartRate;
             }
             if (rhr != null && rhr > 0) {
                 m["rhr"] = rhr;
@@ -596,30 +614,47 @@ class Capture {
 
     //! SensorHistory points (Garmin stress, Body Battery, SpO2) since per-series cursors.
     //! getStressHistory may come back empty on the FR255; the "m" snapshot covers that.
+    //! Each series is read on its own (one failing does not cost the others), and the open batch
+    //! is sealed first when the points would push it past the POST size limit.
     private function harvestHistory(nowS as Number) as Void {
         if (!(Toybox has :SensorHistory)) {
             return;
         }
         var h = {} as Dictionary<String, Array>;
+        var adv = {} as Dictionary<String, Number>;   // new cursor per series, applied below
         var nBytes = 0;
-        try {
-            if (SensorHistory has :getStressHistory) {
-                nBytes += collect(SensorHistory.getStressHistory(histOpts("stress", nowS)), "stress", h);
-            }
-            if (SensorHistory has :getBodyBatteryHistory) {
-                nBytes += collect(SensorHistory.getBodyBatteryHistory(histOpts("bb", nowS)), "bb", h);
-            }
-            if (SensorHistory has :getOxygenSaturationHistory) {
-                nBytes += collect(SensorHistory.getOxygenSaturationHistory(histOpts("spo2", nowS)), "spo2", h);
-            }
-        } catch (e) {
-        }
-        if (h.size() > 0) {
-            builder.setHistory(h, nBytes);
+        if (SensorHistory has :getStressHistory) {
             try {
-                Storage.setValue("hc", _histCursor as Storage.ValueType);
+                nBytes += collect(SensorHistory.getStressHistory(histOpts("stress", nowS)), "stress", h, adv);
             } catch (e) {
             }
+        }
+        if (SensorHistory has :getBodyBatteryHistory) {
+            try {
+                nBytes += collect(SensorHistory.getBodyBatteryHistory(histOpts("bb", nowS)), "bb", h, adv);
+            } catch (e) {
+            }
+        }
+        if (SensorHistory has :getOxygenSaturationHistory) {
+            try {
+                nBytes += collect(SensorHistory.getOxygenSaturationHistory(histOpts("spo2", nowS)), "spo2", h, adv);
+            } catch (e) {
+            }
+        }
+        if (h.size() > 0) {
+            if (builder.bytes + nBytes > Cfg.sealBytes(mode)) {
+                sealNow();   // persists only cursors of points already in that batch
+            }
+            builder.setHistory(h, nBytes);
+            var ks = adv.keys();
+            for (var i = 0; i < ks.size(); i++) {
+                var k = ks[i];
+                var t = adv[k];
+                if (t != null) {
+                    _histCursor[k] = t;
+                }
+            }
+            _histDirty = true;
         }
     }
 
@@ -635,7 +670,8 @@ class Capture {
         return {:period => new Time.Duration(span), :order => SensorHistory.ORDER_OLDEST_FIRST};
     }
 
-    private function collect(it as SensorHistory.SensorHistoryIterator or Null, key as String, h as Dictionary<String, Array>) as Number {
+    private function collect(it as SensorHistory.SensorHistoryIterator or Null, key as String, h as Dictionary<String, Array>,
+            adv as Dictionary<String, Number>) as Number {
         if (it == null) {
             return 0;
         }
@@ -659,7 +695,7 @@ class Capture {
         }
         if (pts.size() > 0) {
             h[key] = pts;
-            _histCursor[key] = newest;
+            adv[key] = newest;
             bytes += 10;
         }
         return bytes;

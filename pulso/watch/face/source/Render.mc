@@ -222,13 +222,20 @@ class Painter {
     private function drawRing(dc as Graphics.Dc, m as Model, now as Number, tz as Number) as Void {
         var r = _cx - 5;
         if (m.ringMode != Lim.RING_NONE) {
+            // Nothing older than 12 h: on a 12-h dial it would land just behind the "now" tick and read
+            // as the last hours. The empty arc between the newest segment and the tick is the data's age.
+            var oldest = now - 43200 + 600;
             for (var i = 0; i < 12; i++) {
                 var t0 = m.ringT0 + i * 3600;
                 var t1 = t0 + 3600;
+                if (t0 < oldest) {
+                    t0 = oldest;
+                }
                 if (t1 > now) {
                     t1 = now;
                 }
-                if (t1 - t0 < 300) {
+                // under 10 min the 1.5-degree insets leave a1 <= a0 and drawArc would sweep the whole circle
+                if (t1 - t0 < 600) {
                     continue;
                 }
                 var a0 = clockDeg(t0, tz) + 1.5;

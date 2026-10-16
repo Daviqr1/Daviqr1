@@ -30,8 +30,6 @@ class Transport {
 
 //! HTTPS POST <central>/v1/ingest through Garmin Connect Mobile (BLE proxy).
 class HttpTransport extends Transport {
-    private var _cb as SendCallback or Null;
-
     function initialize() {
         Transport.initialize();
     }
@@ -45,7 +43,6 @@ class HttpTransport extends Transport {
     }
 
     function send(batch as Dictionary<String, Object>, cb as SendCallback) as Void {
-        _cb = cb;
         var options = {
             :method => Communications.HTTP_REQUEST_METHOD_POST,
             :headers => {
@@ -54,20 +51,27 @@ class HttpTransport extends Transport {
             },
             :responseType => Communications.HTTP_RESPONSE_CONTENT_TYPE_JSON
         };
+        // One callback object per request: a late answer to a request the uploader already gave
+        // up on reaches that request's own callback, never the one of a newer request.
+        var call = new HttpCall(cb);
         try {
-            Communications.makeWebRequest(Cfg.centralUrl() + "/v1/ingest", batch as Dictionary<Object, Object>, options, method(:onResponse));
+            Communications.makeWebRequest(Cfg.centralUrl() + "/v1/ingest", batch as Dictionary<Object, Object>, options, call.method(:onResponse) as Method(responseCode as Number, data as Dictionary or String or PersistedContent.Iterator or Null) as Void);
         } catch (e) {
-            _cb = null;
             cb.invoke(Communications.UNKNOWN_ERROR, null);
         }
     }
+}
+
+//! The pending state of one HTTP request.
+class HttpCall {
+    private var _cb as SendCallback;
+
+    function initialize(cb as SendCallback) {
+        _cb = cb;
+    }
 
     function onResponse(code as Number, data as Dictionary or String or PersistedContent.Iterator or Null) as Void {
-        var cb = _cb;
-        _cb = null;
-        if (cb != null) {
-            cb.invoke(code, (data instanceof Dictionary) ? data as Dictionary : null);
-        }
+        _cb.invoke(code, (data instanceof Dictionary) ? data as Dictionary : null);
     }
 }
 

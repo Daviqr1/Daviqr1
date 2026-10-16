@@ -17,7 +17,7 @@
     <string id="StNoPhone">sem cel.</string>
     <string id="StToken">token?</string>
     <string id="StConfig">config?</string>
-    <string id="StTimeout">timeout</string>
+    <string id="StTimeout">sem resp.</string>
     <string id="StError">erro</string>
     <string id="StPaused">pausado</string>
     <string id="StWait">aguardando</string>

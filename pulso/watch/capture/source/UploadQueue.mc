@@ -123,6 +123,9 @@ class UploadQueue {
 
     //! Remove a batch the central will never accept (or that vanished); counted as a drop.
     function reject(q as Number) as Void {
+        if (_ids.indexOf(q) < 0) {
+            return;   // already evicted (and counted) while its request was in flight
+        }
         remove(q);
         drops++;
         pendingDrops++;

@@ -63,7 +63,7 @@
     <string id="SModeTitle">Modo padrão</string>
     <string id="SBudgetTitle">Orçamento de bateria (%/h)</string>
     <string id="SSleepBudgetTitle">Orçamento no SONO (%/h)</string>
-    <string id="SBudgetError">Use um valor entre 0.5 e 20</string>
+    <string id="SBudgetError">Use um valor entre 0 e 20 (0 = sem limite)</string>
     <string id="SFloorTitle">Bateria mínima para capturar (%)</string>
     <string id="SFloorError">Use um valor entre 5 e 50</string>
     <string id="SFitTitle">Gravar FIT no TREINO</string>

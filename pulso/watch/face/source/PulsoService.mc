@@ -26,14 +26,14 @@ module Harvest {
         var h = {} as Dictionary<String, Array>;
         var win = {} as Dictionary<String, Number>;
         if (Toybox has :SensorHistory) {
-            //                       key   min spacing s, max points, valid range, 1 decimal
-            series(h, win, cur, now, "hr", 60, 61, 25, 230, false);
-            series(h, win, cur, now, "stress", 180, 21, 0, 100, false);
-            series(h, win, cur, now, "bb", 180, 21, 0, 100, false);
-            series(h, win, cur, now, "spo2", 300, 13, 70, 100, false);
-            series(h, win, cur, now, "temp", 300, 13, -20, 60, true);
-            series(h, win, cur, now, "press", 300, 13, 30000, 110000, false);
-            series(h, win, cur, now, "elev", 300, 13, -500, 9000, false);
+            //                                 [min spacing s, max points, valid lo, valid hi, 1 = one decimal]
+            series(h, win, cur, now, "hr", [60, 61, 25, 230, 0]);
+            series(h, win, cur, now, "stress", [180, 21, 0, 100, 0]);
+            series(h, win, cur, now, "bb", [180, 21, 0, 100, 0]);
+            series(h, win, cur, now, "spo2", [300, 13, 70, 100, 0]);
+            series(h, win, cur, now, "temp", [300, 13, -20, 60, 1]);
+            series(h, win, cur, now, "press", [300, 13, 30000, 110000, 0]);
+            series(h, win, cur, now, "elev", [300, 13, -500, 9000, 0]);
             cap(h, win);
         }
         var b = {
@@ -49,38 +49,48 @@ module Harvest {
         return [b, win];
     }
 
+    //! Reads one SensorHistory series into h[key]. `spec` bundles the per-series limits so the call
+    //! stays far below the VM's 10-argument limit (which counts the implicit `self`).
     function series(h as Dictionary<String, Array>, win as Dictionary<String, Number>, cur as Dictionary,
-                    now as Number, key as String, spacing as Number, maxN as Number,
-                    lo as Number, hi as Number, decimals as Boolean) as Void {
+                    now as Number, key as String, spec as Array<Number>) as Void {
+        var spacing = spec[0];
+        var maxN = spec[1];
+        var lo = spec[2];
+        var hi = spec[3];
+        var tenths = spec[4] == 1;
+        // firmware timestamps jitter by a few seconds: a strict ">= spacing" would drop every other
+        // 3-min stress sample that arrives at 179 s
+        var minGap = spacing - spacing / 8;
         var since = now - LOOKBACK_S;
         var lastKept = since - spacing;
         var c = cur[key];
-        if (c instanceof Number && c > since) {
+        // a cursor ahead of the clock (clock set back) would stall the series and give a negative period
+        if (c instanceof Number && c > since && c <= now) {
             since = c;
             lastKept = c;
         }
-        win[key] = since;
         var pts = [] as Array<Array>;
+        var complete = false;
         try {
             var it = iterator(key, new Time.Duration(now - since + 60));
-            if (it == null) {
-                return;
-            }
-            var s = it.next();
-            while (s != null && pts.size() < maxN) {
-                var v = s.data;
-                var w = s.when;
-                if (v != null && w != null) {
-                    var t = w.value();
-                    if (t > since && t - lastKept >= spacing) {
-                        var f = v.toFloat();
-                        if (f >= lo && f <= hi) {
-                            pts.add([t, decimals ? (f * 10).toNumber() / 10.0 : Math.round(f).toNumber()]);
-                            lastKept = t;
+            if (it != null) {
+                var s = it.next();
+                while (s != null && pts.size() < maxN) {
+                    var v = s.data;
+                    var w = s.when;
+                    if (v != null && w != null) {
+                        var t = w.value();
+                        if (t > since && t - lastKept >= minGap) {
+                            var f = v.toFloat();
+                            if (f >= lo && f <= hi) {
+                                pts.add([t, tenths ? Math.round(f * 10).toNumber() / 10.0 : Math.round(f).toNumber()]);
+                                lastKept = t;
+                            }
                         }
                     }
+                    s = it.next();
                 }
-                s = it.next();
+                complete = s == null;   // history exhausted, not cut at maxN
             }
         } catch (e) {
             // a history that throws (unsupported, out of memory) just contributes nothing
@@ -88,8 +98,10 @@ module Harvest {
         if (pts.size() > 0) {
             h[key] = pts;
         }
-        if (pts.size() >= maxN) {
-            win.remove(key);   // truncated: this batch does not cover the whole window, keep older copies
+        // Only a complete read proves this batch carries every point after `since`; strip() relies on
+        // that to drop older queued copies, so a failed or truncated read must not claim the window.
+        if (complete) {
+            win[key] = since;
         }
     }
 
@@ -344,7 +356,9 @@ class PulsoService extends System.ServiceDelegate {
             handle(code, data);
         } catch (e) {
             save();
-            finish(K.CODE_EXCEPTION);
+            // an error while flushing old batches must not hide that the fresh upload went through
+            var st = _status;
+            finish(st != null ? st : K.CODE_EXCEPTION);
         }
     }
 

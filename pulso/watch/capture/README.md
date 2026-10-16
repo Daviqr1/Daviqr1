@@ -19,8 +19,10 @@ transmite.
 | **MAX** | tudo | acelerômetro na **taxa máxima** do aparelho, giroscópio se existir, FIT sempre | 1 s | a cada 60 s | completa | sempre |
 
 Em todos os modos cada lote leva ainda: bateria (`bat`), um retrato do ActivityMonitor (`m`: estresse
-Garmin de 30 s, respiração, passos, FC de repouso) e, a cada 10 min, os pontos novos do SensorHistory
-(estresse, Body Battery, SpO2). No início de cada sessão vai um evento de configuração, por exemplo
+Garmin de 30 s, respiração, passos, FC de repouso medida) e, a cada 10 min, os pontos novos do SensorHistory
+(estresse, Body Battery, SpO2; até 60 por série por coleta, o resto vem na próxima). Se esses pontos
+fariam o lote passar do limite, o lote aberto é fechado antes; o cursor de cada série só é gravado
+quando o lote com os pontos já está na fila. No início de cada sessão vai um evento de configuração, por exemplo
 `["cfg", "acc_max=100 sys_max=100 gyro_max=0 p=1 hz=25 gyro=0 fit=acc v=0.1.0"]`, com as taxas
 máximas que o relógio informou em tempo de execução (nada fica fixo no código).
 
@@ -127,7 +129,10 @@ nunca se repete para conteúdo diferente (a central deduplica por `(d, q)`).
   envia na hora). No SONO só envia antes dos 10 min se a fila passar de 24 KB.
 - Erros: sem celular (`-104`) espera 1 → 30 min; outros erros 15 s → 10 min, dobrando; `401/403` espera
   30 min (token errado). `400/413/422` e corpo grande demais descartam o lote (a central nunca o
-  aceitaria); oito falhas seguidas do mesmo lote por outros motivos também. “Enviar agora” no menu zera a espera.
+  aceitaria); oito falhas seguidas do mesmo lote por erro do próprio lote (`500/501`, `-402/-403`) também.
+  Central desligada, túnel caído (`404`, `502–504`, `52x`), timeouts e erros de BLE **nunca** descartam:
+  o lote espera na fila. Cada tentativa tem o seu próprio callback, então uma resposta atrasada de uma
+  tentativa abandonada nunca é creditada a outro lote. “Enviar agora” no menu zera a espera.
 
 ## Bateria e o governador
 
