@@ -1,34 +1,54 @@
-"""Publish the health summary as ONE Google Doc, updated in place every day.
+"""Publish the health summary documents as Google Docs, each overwritten IN PLACE.
 
-NotebookLM keeps a Google Doc source linked to its Drive file; updating the same file id (instead
-of creating a new doc each day) means you add the source once and only re-sync it. Upload path:
-Markdown -> HTML -> Drive import into a Google Doc (HTML -> Docs conversion is the long-standing,
-well-supported import route).
+Why in place: Gemini Notebook (ex-NotebookLM) keeps Drive-imported Google Docs in sync on its own
+(since May 2026, personal accounts included), and the Gemini app sees the same notebook. Deleting
+and recreating a Doc drops it from the notebook — so the file id is sacred: we only recreate after
+a 404 (you trashed it), and say so loudly.
 
-Auth: OAuth for an installed (desktop) app, scope `drive.file` — the app only sees files it
-created. One-time setup in docs/notebooklm.md:
-    PULSO_GDRIVE_CLIENT=~/.pulso/google-client.json   (OAuth client of type "Desktop app")
-    PULSO_GDRIVE_TOKEN=~/.pulso/google-token.json      (written on first run)
-The doc id is remembered in ~/.pulso/google-doc-id.
+Upload: Markdown -> HTML (with charset; tables documented for HTML import) -> Drive import into a
+Google Doc. Auth: OAuth "Desktop app" client, scope drive.file only (non-sensitive: the app only
+sees files it created). The background job never opens a browser — `pulso export --login` does,
+once. Setup and gotchas (publish the OAuth app "In production" or the token dies in 7 days):
+docs/gemini-notebook.md.
 """
 
 from __future__ import annotations
 
 import html
+import io
+import json
 import os
 import re
 from pathlib import Path
 
 from pulso import config
 
-SCOPES = ["https://www.googleapis.com/auth/drive.file"]
+DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.file"
+CAL_SCOPE = "https://www.googleapis.com/auth/calendar.events"
 DOC_MIME = "application/vnd.google-apps.document"
-TITLE = "Pulso — resumo de saúde e estresse"
+APP_KEY = "pulso"
+
+
+class NeedsLogin(RuntimeError):
+    pass
+
+
+def scopes() -> list[str]:
+    s = [DRIVE_SCOPE]
+    if os.environ.get("PULSO_GCAL_ALERTS") == "1":
+        s.append(CAL_SCOPE)
+    return s
+
+
+def _paths() -> tuple[Path, Path, Path]:
+    h = config.home()
+    client = Path(os.environ.get("PULSO_GDRIVE_CLIENT", h / "google-client.json")).expanduser()
+    token = Path(os.environ.get("PULSO_GDRIVE_TOKEN", h / "google-token.json")).expanduser()
+    return client, token, h / "google-docs.json"
 
 
 def md_to_html(md: str) -> str:
-    """Small Markdown subset -> HTML (headings, bold, lists, tables, paragraphs). Enough for the
-    summary we generate; keeps the dependency list short."""
+    """Markdown subset we generate (headings, bold, code, lists, tables, paragraphs) -> HTML."""
     out: list[str] = ["<html><head><meta charset='utf-8'></head><body>"]
     lines = md.splitlines()
     i = 0
@@ -36,6 +56,7 @@ def md_to_html(md: str) -> str:
     def inline(t: str) -> str:
         t = html.escape(t)
         t = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", t)
+        t = re.sub(r"(?<![\w*])\*(?!\s)(.+?)(?<!\s)\*(?![\w*])", r"<i>\1</i>", t)
         t = re.sub(r"`(.+?)`", r"<code>\1</code>", t)
         return t
 
@@ -67,10 +88,13 @@ def md_to_html(md: str) -> str:
                     i += 1
                 out.append(f"<li>{inline(item)}</li>")
             out.append("</ul>")
+        elif ln.strip() == "---":
+            out.append("<hr>")
+            i += 1
         elif ln.strip():
             para = [ln.strip()]
             i += 1
-            while i < len(lines) and lines[i].strip() and not lines[i].startswith(("#", "|", "- ")):
+            while i < len(lines) and lines[i].strip() and not lines[i].startswith(("#", "|", "- ")) and lines[i].strip() != "---":
                 para.append(lines[i].strip())
                 i += 1
             out.append(f"<p>{inline(' '.join(para))}</p>")
@@ -80,57 +104,106 @@ def md_to_html(md: str) -> str:
     return "\n".join(out)
 
 
-def _paths() -> tuple[Path, Path, Path]:
-    h = config.home()
-    client = Path(os.environ.get("PULSO_GDRIVE_CLIENT", h / "google-client.json")).expanduser()
-    token = Path(os.environ.get("PULSO_GDRIVE_TOKEN", h / "google-token.json")).expanduser()
-    return client, token, h / "google-doc-id"
-
-
-def _service():
+def credentials(interactive: bool = False):
     try:
+        import google.auth.exceptions
         from google.auth.transport.requests import Request
         from google.oauth2.credentials import Credentials
-        from google_auth_oauthlib.flow import InstalledAppFlow
-        from googleapiclient.discovery import build
     except ImportError as e:  # pragma: no cover
         raise SystemExit("pip install 'pulso[gdrive]' para publicar no Google Drive") from e
     client, token, _ = _paths()
-    creds = None
-    if token.exists():
-        creds = Credentials.from_authorized_user_file(str(token), SCOPES)
+    creds = Credentials.from_authorized_user_file(str(token), scopes()) if token.exists() else None
+    if creds and not set(scopes()) <= set(creds.scopes or []):
+        creds = None  # scopes changed (e.g. Calendar alerts turned on): log in again
     if creds and creds.expired and creds.refresh_token:
         try:
             creds.refresh(Request())
-        except Exception:
-            creds = None  # e.g. refresh token expired (OAuth app in "testing" mode: 7 days)
+        except google.auth.exceptions.RefreshError:
+            creds = None  # revoked / expired (OAuth app left in "Testing": 7 days)
     if not creds or not creds.valid:
+        if not interactive:
+            raise NeedsLogin("Google: login necessário — rode `pulso export --login` no notebook")
         if not client.exists():
-            raise SystemExit(f"cliente OAuth não encontrado em {client} — veja docs/notebooklm.md")
-        flow = InstalledAppFlow.from_client_secrets_file(str(client), SCOPES)
-        creds = flow.run_local_server(port=0)
+            raise SystemExit(f"cliente OAuth não encontrado em {client} — veja docs/gemini-notebook.md")
+        from google_auth_oauthlib.flow import InstalledAppFlow
+
+        flow = InstalledAppFlow.from_client_secrets_file(str(client), scopes())
+        creds = flow.run_local_server(port=0, timeout_seconds=300)
     token.parent.mkdir(parents=True, exist_ok=True)
     token.write_text(creds.to_json(), encoding="utf-8")
     os.chmod(token, 0o600)
-    return build("drive", "v3", credentials=creds, cache_discovery=False)
+    return creds
 
 
-def publish(md: str, service=None, title: str = TITLE) -> str:
-    """Create the doc on first run, then update the same file. Returns its URL."""
-    from googleapiclient.http import MediaInMemoryUpload
+def service(interactive: bool = False):
+    from googleapiclient.discovery import build
 
-    svc = service or _service()
-    _, _, id_file = _paths()
-    media = MediaInMemoryUpload(md_to_html(md).encode("utf-8"), mimetype="text/html", resumable=False)
-    file_id = id_file.read_text().strip() if id_file.exists() else None
+    return build("drive", "v3", credentials=credentials(interactive), cache_discovery=False)
+
+
+def _ids() -> dict[str, str]:
+    _, _, f = _paths()
+    try:
+        return json.loads(f.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_ids(ids: dict[str, str]) -> None:
+    _, _, f = _paths()
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(json.dumps(ids, indent=1))
+
+
+def _media(md: str):
+    from googleapiclient.http import MediaIoBaseUpload
+
+    return MediaIoBaseUpload(io.BytesIO(md_to_html(md).encode("utf-8")), mimetype="text/html", resumable=False)
+
+
+def _find(svc, key: str) -> str | None:
+    """Recover a lost id: drive.file can list the files this app created."""
+    q = f"appProperties has {{ key='{APP_KEY}' and value='{key}' }} and trashed = false"
+    res = svc.files().list(q=q, spaces="drive", fields="files(id,modifiedTime)", orderBy="modifiedTime desc").execute(num_retries=3)
+    files = res.get("files", [])
+    return files[0]["id"] if files else None
+
+
+def publish_doc(svc, key: str, title: str, md: str, ids: dict[str, str], log=print) -> str:
+    from googleapiclient.errors import HttpError
+
+    file_id = ids.get(key) or _find(svc, key)
     if file_id:
         try:
-            svc.files().update(fileId=file_id, media_body=media, fields="id").execute()
-            return f"https://docs.google.com/document/d/{file_id}/edit"
-        except Exception:
-            file_id = None  # deleted or not ours anymore: create a new one
-    created = svc.files().create(body={"name": title, "mimeType": DOC_MIME}, media_body=media, fields="id").execute()
-    file_id = created["id"]
-    id_file.parent.mkdir(parents=True, exist_ok=True)
-    id_file.write_text(file_id)
-    return f"https://docs.google.com/document/d/{file_id}/edit"
+            svc.files().update(fileId=file_id, media_body=_media(md), fields="id,modifiedTime").execute(num_retries=3)
+            ids[key] = file_id
+            return file_id
+        except HttpError as e:
+            if getattr(e, "status_code", None) != 404 and getattr(getattr(e, "resp", None), "status", None) != 404:
+                raise  # auth/quota/etc: never recreate (it would drop the source from the notebook)
+            log(f"o Doc '{title}' sumiu do Drive; criando outro — adicione o novo no Gemini Notebook")
+    created = svc.files().create(
+        body={"name": title, "mimeType": DOC_MIME, "appProperties": {APP_KEY: key}},
+        media_body=_media(md), fields="id,webViewLink",
+    ).execute(num_retries=3)
+    ids[key] = created["id"]
+    return created["id"]
+
+
+def publish_all(docs, svc=None, log=print) -> dict[str, str]:
+    """Publish summary.Doc list; returns {key: url}."""
+    svc = svc or service()
+    ids = _ids()
+    out = {}
+    for d in docs:
+        fid = publish_doc(svc, d.key, d.title, d.markdown, ids, log=log)
+        out[d.key] = f"https://docs.google.com/document/d/{fid}/edit"
+    _save_ids(ids)
+    return out
+
+
+def publish(md: str, service=None, title: str = "Pulso · Saúde") -> str:
+    """Single-document variant (kept for the CLI/tests)."""
+    from pulso.export.summary import Doc
+
+    return publish_all([Doc("tudo", title, md)], svc=service)["tudo"]

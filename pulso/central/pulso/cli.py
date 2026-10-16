@@ -106,9 +106,10 @@ def main(argv: list[str] | None = None) -> int:
     nb.add_argument("--tunnel", choices=["tailscale", "cloudflared"], help="abre HTTPS público para o celular")
     nb.add_argument("--no-jobs", action="store_true")
 
-    ex = sub.add_parser("export", help="resumo de saúde para NotebookLM/Gemini (Markdown local e/ou Google Doc)")
-    ex.add_argument("--days", type=int, default=14)
-    ex.add_argument("--drive", action="store_true", help="publica/atualiza o Google Doc (ver docs/notebooklm.md)")
+    ex = sub.add_parser("export", help="resumo de saúde para o Gemini Notebook/Gemini (Markdown local e/ou Google Docs)")
+    ex.add_argument("--days", type=int, default=60, help="janela do documento dia a dia")
+    ex.add_argument("--drive", action="store_true", help="publica/atualiza os Google Docs (ver docs/gemini-notebook.md)")
+    ex.add_argument("--login", action="store_true", help="login Google interativo (uma vez, no notebook)")
     ex.add_argument("--com-nomes", action="store_true", help="mantém nomes de colegas (padrão: pseudônimos)")
 
     dm = sub.add_parser("daemon", help="jobs periódicos: reanálise, Garmin Connect, relatórios")
@@ -241,13 +242,18 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "export":
         from pulso.export import summary
 
-        md = summary.build(conn, tz, days=args.days, names=args.com_nomes)
-        path = summary.write_local(md, tz)
-        print(f"resumo: {path}")
+        if args.login:
+            from pulso.export import gdrive
+
+            gdrive.credentials(interactive=True)
+            print("login Google ok (token em ~/.pulso/google-token.json)")
+        docs = summary.documents(conn, tz, names=args.com_nomes, days=args.days)
+        print(f"resumos: {summary.write_local(docs, tz)}")
         if args.drive:
             from pulso.export import gdrive
 
-            print(f"Google Doc: {gdrive.publish(md)}")
+            for key, url in gdrive.publish_all(docs).items():
+                print(f"{key}: {url}")
         return 0
 
     if args.cmd == "daemon":

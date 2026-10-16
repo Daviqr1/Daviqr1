@@ -32,5 +32,5 @@ pulso notebook --ble --tunnel tailscale   # central inteira no notebook
 pulso inventory                           # o que tem no banco
 pulso analyze --days 7                    # recalcula
 pulso report --dry-run --days 1           # fatos que o relatório usaria
-pulso export --drive                      # resumo para o NotebookLM
+pulso export --drive                      # resumo para o Gemini Notebook (ex-NotebookLM)
 ```

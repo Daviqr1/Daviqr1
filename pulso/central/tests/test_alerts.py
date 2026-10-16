@@ -77,12 +77,16 @@ def test_summary_markdown(tmp_path):
     conn = store.connect(":memory:")
     _fill_days(conn, date(2026, 9, 20), 16, date(2026, 10, 5))
     jobs.run_range(conn, date(2026, 10, 3), date(2026, 10, 5), TZ)
-    md = summary.build(conn, TZ, today=date(2026, 10, 5), days=7)
-    assert "# Pulso — resumo de saúde e estresse" in md and "## Como ler" in md
-    assert "| 2026-10-05 |" in md and "Revisão de prazo" in md
-    assert "texto" not in md.lower().split("## como ler")[0]  # no transcript text leaks into the summary
-    p = summary.write_local(md, TZ, folder=tmp_path)
-    assert p.read_text(encoding="utf-8") == md and len(list(tmp_path.glob("pulso-saude-*.md"))) == 1
+    docs = summary.documents(conn, TZ, today=date(2026, 10, 5), days=7)
+    assert [d.key for d in docs] == ["hoje", "dias", "semanas"]
+    hoje, dias, semanas = (d.markdown for d in docs)
+    assert hoje.splitlines()[2].startswith("Atualizado em:") and "\nALERTA: " in hoje
+    assert "| 2026-10-05 |" in hoje and "## Como ler" in hoje
+    assert "## 2026-10-05 (seg)" in dias and "Revisão de prazo" in dias
+    assert "## Semanas (ISO)" in semanas and "2026-S41" in semanas
+    p = summary.write_local(docs, TZ, folder=tmp_path)
+    assert (p / "pulso-hoje.md").read_text(encoding="utf-8") == hoje
+    assert len(list(tmp_path.glob("pulso-*-*.md"))) == 3
 
 
 def test_summary_pseudonymises_people(tmp_path):
@@ -96,6 +100,20 @@ def test_summary_pseudonymises_people(tmp_path):
         {"start_ms": a + 600 * MIN, "end_ms": a + 620 * MIN, "peak_ms": a + 610 * MIN, "peak_z": 2.1, "kind": "mental",
          "overlaps": ["m1"]}]})
     md = summary.build(conn, TZ, today=date(2026, 10, 7), days=1)
-    assert "Ana" not in md and "Pessoa" in md
+    assert "Ana" not in md and "Bruno" not in md and "Pessoa" in md
     md2 = summary.build(conn, TZ, today=date(2026, 10, 7), days=1, names=True)
     assert "Ana Souza" in md2
+
+
+def test_alert_level_line():
+    from pulso.export import summary
+
+    conn = store.connect(":memory:")
+    now = _day() + 15 * 60 * MIN
+    assert summary.alert_level(conn, now)[0] == "NENHUM"
+    store.put_artefact(conn, "sleep:last", "latest", {"debt_min": 400, "hrv_status": "normal"})
+    assert summary.alert_level(conn, now)[0] == "ATENÇÃO"
+    store.upsert_samples(conn, M.AROUSAL_Z, M.DERIVED, [(now - k * MIN, 2.6) for k in range(10)])
+    alerts.evaluate(conn, now, TZ)
+    lvl, why = summary.alert_level(conn, now + MIN)
+    assert lvl == "ALTO" and "Ativação alta" in why

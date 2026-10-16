@@ -64,6 +64,7 @@ ou túnel Cloudflare/Tailscale).
 - [Protocolo relógio ↔ central](docs/protocolo.md)
 - [Ponte BLE e cinta](docs/ponte-ble.md)
 - [Central no notebook (e por onde cada pacote vai)](docs/notebook.md)
+- [Resumo no Gemini Notebook (ex-NotebookLM) e alertas](docs/gemini-notebook.md)
 - [Deploy e Claude/MCP](docs/deploy.md)
 - [Privacidade](docs/privacidade.md)
 

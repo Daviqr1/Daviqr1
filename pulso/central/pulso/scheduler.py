@@ -57,6 +57,11 @@ def loop(settings: config.Settings | None = None, once: bool = False) -> None:
 
                 n = analysis.analyze_day(conn, today, settings.tz).summary()["minutes_with_hr"]
                 fired = alerts.evaluate(conn, int(time.time() * 1000), settings.tz)
+                if fired and os.environ.get("PULSO_GCAL_ALERTS") == "1":
+                    from pulso.export import gcal
+
+                    for a in fired:
+                        gcal.push(a.as_dict())
                 return f"{n} min com FC; alertas: {[a.kind for a in fired]}"
 
             _run(conn, "analyze:today", _today)
@@ -72,7 +77,9 @@ def loop(settings: config.Settings | None = None, once: bool = False) -> None:
             _run(conn, "analyze:range", lambda: jobs.run_range(conn, today - timedelta(days=3), today, settings.tz)["meetings"]["n_meetings"])
 
         has_claude = bool(settings.anthropic_api_key or os.path.exists(os.path.expanduser("~/.config/anthropic")))
-        if has_claude and now.hour == 7 and f"daily:{stamp}" not in done_today:
+        # 06:30 report, 06:45 export: a Gemini Schedule at 08:00 prepares its answer during the hour
+        # before delivery, so the Docs must already be fresh by ~06:45
+        if has_claude and (now.hour, now.minute) >= (6, 30) and now.hour < 12 and f"daily:{stamp}" not in done_today:
             done_today.add(f"daily:{stamp}")
             from pulso.ai import report
 
@@ -81,20 +88,20 @@ def loop(settings: config.Settings | None = None, once: bool = False) -> None:
             if today.weekday() == 0:
                 _run(conn, "report:weekly", lambda: report.generate(conn, today - timedelta(days=7), y, settings.tz,
                                                                      kind="weekly", settings=settings).get("headline"))
-        # health summary for NotebookLM/Gemini: every morning after the report (local file always,
-        # Google Doc when PULSO_GDRIVE_DOC_ID or the OAuth client is configured)
-        if now.hour == 7 and now.minute >= 15 and f"export:{stamp}" not in done_today:
+        # health summary for Gemini Notebook / Gemini: every morning (local files always, Google Docs
+        # when the Google login exists), and the 'Hoje' doc again every 2 h during the day
+        if (now.hour, now.minute) >= (6, 45) and f"export:{stamp}" not in done_today or due("export", 2 * 3600):
             done_today.add(f"export:{stamp}")
+            last["export"] = time.time()
 
             def _export():
-                from pulso.export import summary
+                from pulso.export import gdrive, summary
 
-                md = summary.build(conn, settings.tz)
-                path = summary.write_local(md, settings.tz)
-                if os.environ.get("PULSO_GDRIVE_CLIENT") or os.environ.get("PULSO_GDRIVE_TOKEN"):
-                    from pulso.export import gdrive
-
-                    return f"{path} + {gdrive.publish(md)}"
+                docs = summary.documents(conn, settings.tz)
+                path = summary.write_local(docs, settings.tz)
+                _, token, _ = gdrive._paths()
+                if token.exists():
+                    return f"{path} + {list(gdrive.publish_all(docs).values())}"
                 return str(path)
 
             _run(conn, "export:summary", _export)
