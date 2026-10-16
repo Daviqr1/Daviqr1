@@ -9,7 +9,7 @@ fields are seconds (Time.now()), `_ms` fields milliseconds (Time.now() anchored 
       "v": 1,                      protocol version
       "d": "fr255-a1b2",           device id (random, generated on the watch at install)
       "q": 1842,                   per-device sequence number -> idempotency key (d, q)
-      "src": "face"|"cap"|"ble",   which component sent it
+      "src": "face"|"cap"|"ble"|"strap",  which component sent it (strap = chest strap read by the bridge)
       "sid": "c-1739...",          capture session id (cap/ble only)
       "t": 1760630400,             send time, epoch s (used to estimate clock skew)
       "h": {"hr": [[t_s, v], ...], "stress": [...], "bb": [...], "spo2": [...],
@@ -49,7 +49,7 @@ class Batch(BaseModel):
     v: int = 1
     d: str = Field(min_length=3, max_length=64)
     q: int = Field(ge=0)
-    src: str = Field(pattern=r"^(face|cap|ble)$")
+    src: str = Field(pattern=r"^(face|cap|ble|strap)$")
     sid: str | None = Field(default=None, max_length=64)
     t: int | None = None
     h: dict[str, list[tuple[int, float | None]]] = Field(default_factory=dict)

@@ -23,7 +23,7 @@ analysis = ["scikit-learn>=1.5", "statsmodels>=0.14", "ruptures>=1.1"]
 garmin = ["garminconnect>=0.2.30", "garmin-fit-sdk>=21.0"]
 ai = ["anthropic>=1.0", "mcp>=1.20"]
 calendar = ["icalendar>=6.0"]
-bridge = ["bless>=0.2.6"]
+bridge = ["bless>=0.3", "bleak>=1.1"]
 dev = ["pytest>=8.0", "neurokit2>=0.2.10"]
 all = ["pulso[analysis,garmin,ai,calendar,dev]"]
 

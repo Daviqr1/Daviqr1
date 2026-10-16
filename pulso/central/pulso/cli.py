@@ -82,6 +82,17 @@ def main(argv: list[str] | None = None) -> int:
     m.add_argument("--host", default="127.0.0.1")
     m.add_argument("--port", type=int, default=8765)
 
+    br = sub.add_parser("bridge", help="ponte BLE no notebook (relógio e cintas)")
+    bsub = br.add_subparsers(dest="bcmd", required=True)
+    bw = bsub.add_parser("watch", help="periférico GATT para o Pulso Captura (modo Ponte BLE)")
+    bh = bsub.add_parser("hrm", help="cinta de FC (Polar H10, HRM-Pro) ou broadcast do relógio")
+    bh.add_argument("--name", default="Polar", help="parte do nome do dispositivo BLE")
+    bh.add_argument("--seconds", type=float, help="duração (padrão: até Ctrl+C)")
+    bh.add_argument("--probe", action="store_true", help="só testa se vem RR (ex.: broadcast do FR255)")
+    for b in (bw, bh):
+        b.add_argument("--central", help="URL da central (senão grava direto no banco local)")
+        b.add_argument("--token", help="token de aparelho para a central")
+
     sub.add_parser("inventory", help="o que existe no banco")
 
     args = p.parse_args(argv)
@@ -172,6 +183,25 @@ def main(argv: list[str] | None = None) -> int:
         from pulso import mcp_server
 
         mcp_server.run(conn, tz, http=args.http, host=args.host, port=args.port, settings=settings)
+        return 0
+
+    if args.cmd == "bridge":
+        import asyncio
+
+        from pulso.bridge.peripheral import http_sink, local_sink
+
+        sink = http_sink(args.central, args.token or "") if args.central else local_sink(str(db_path))
+        if args.bcmd == "watch":
+            from pulso.bridge.peripheral import serve
+
+            asyncio.run(serve(sink))
+        else:
+            from pulso.bridge.hrm import stream
+
+            secs = 120.0 if args.probe and not args.seconds else args.seconds
+            on_batch = (lambda b: None) if args.probe else sink
+            asyncio.run(stream(args.name, on_batch, device_id=f"hrm-{args.name.lower().replace(' ', '-')}",
+                               seconds=secs, src="strap"))
         return 0
 
     if args.cmd == "inventory":

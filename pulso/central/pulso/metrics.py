@@ -38,9 +38,10 @@ RR_QUALITY = "rr_quality"          # 0..1 untouched beats in the window
 SRC_CIQ_FACE = "ciq:face"          # watch face background service (SensorHistory, 2-5 min data)
 SRC_CIQ_CAPTURE = "ciq:capture"    # capture app via makeWebRequest
 SRC_BLE = "ble:bridge"             # capture app via the BLE bridge
+SRC_STRAP = "ble:strap"            # chest strap (Polar H10 etc.) read directly by the bridge: ECG-grade RR
 SRC_FIT = "fit"                    # FIT files from the watch (monitoring, sleep, activities)
 SRC_GC = "gc"                      # Garmin Connect API
 DERIVED = "derived:v1"
 
 # preference order when the same metric exists from several sources (first wins per minute)
-HR_PREFERENCE = (SRC_BLE, SRC_CIQ_CAPTURE, SRC_FIT, SRC_GC, SRC_CIQ_FACE)
+HR_PREFERENCE = (SRC_STRAP, SRC_BLE, SRC_CIQ_CAPTURE, SRC_FIT, SRC_GC, SRC_CIQ_FACE)

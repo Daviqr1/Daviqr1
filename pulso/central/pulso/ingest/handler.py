@@ -13,7 +13,7 @@ from pulso import store
 from pulso.ingest.protocol import HISTORY_KEYS, Batch
 from pulso.store import Event
 
-SRC = {"face": M.SRC_CIQ_FACE, "cap": M.SRC_CIQ_CAPTURE, "ble": M.SRC_BLE}
+SRC = {"face": M.SRC_CIQ_FACE, "cap": M.SRC_CIQ_CAPTURE, "ble": M.SRC_BLE, "strap": M.SRC_STRAP}
 
 # ActivityMonitor snapshot keys -> canonical metrics
 SNAPSHOT_KEYS = {"stress": "stress_now", "resp": M.RESP_RATE, "rhr": M.RESTING_HR}
