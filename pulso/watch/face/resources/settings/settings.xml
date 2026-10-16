@@ -1,0 +1,27 @@
+<settings>
+    <setting propertyKey="@Properties.centralUrl" title="@Strings.SetUrlTitle" prompt="@Strings.SetUrlPrompt">
+        <settingConfig type="url" required="true"/>
+    </setting>
+    <setting propertyKey="@Properties.deviceToken" title="@Strings.SetTokenTitle" prompt="@Strings.SetTokenPrompt">
+        <settingConfig type="password"/>
+    </setting>
+    <setting propertyKey="@Properties.uploadEnabled" title="@Strings.SetUploadTitle">
+        <settingConfig type="boolean"/>
+    </setting>
+    <setting propertyKey="@Properties.showSeconds" title="@Strings.SetSecondsTitle">
+        <settingConfig type="boolean"/>
+    </setting>
+    <setting propertyKey="@Properties.ringSource" title="@Strings.SetRingTitle">
+        <settingConfig type="list">
+            <listEntry value="0">@Strings.RingAuto</listEntry>
+            <listEntry value="1">@Strings.RingCentral</listEntry>
+            <listEntry value="2">@Strings.RingGarmin</listEntry>
+        </settingConfig>
+    </setting>
+    <setting propertyKey="@Properties.batterySaver" title="@Strings.SetSaverTitle">
+        <settingConfig type="boolean"/>
+    </setting>
+    <setting propertyKey="@Properties.deviceId" title="@Strings.SetDeviceIdTitle">
+        <settingConfig type="alphaNumeric" readonly="true"/>
+    </setting>
+</settings>

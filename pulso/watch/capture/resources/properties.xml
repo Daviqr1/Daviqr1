@@ -1,0 +1,9 @@
+<properties>
+    <property id="centralUrl" type="string"></property>
+    <property id="deviceToken" type="string"></property>
+    <property id="defaultMode" type="number">0</property>
+    <property id="budgetPctH" type="float">3.0</property>
+    <property id="sleepBudgetPctH" type="float">1.0</property>
+    <property id="floorPct" type="number">15</property>
+    <property id="fitEnabled" type="boolean">true</property>
+</properties>

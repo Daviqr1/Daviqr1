@@ -1,0 +1,16 @@
+<resources>
+    <strings>
+        <string id="FitEnmoLabel">Movimento (ENMO)</string>
+        <string id="FitEnmoUnit">mg</string>
+        <string id="FitDfaLabel">DFA α1 x100</string>
+        <string id="FitDfaUnit">x100</string>
+    </strings>
+    <fitContributions>
+        <fitField id="1" displayInChart="true" sortOrder="0" precision="0"
+                  chartTitle="@Strings.FitEnmoLabel" dataLabel="@Strings.FitEnmoLabel"
+                  unitLabel="@Strings.FitEnmoUnit" fillColor="#00AAFF" />
+        <fitField id="2" displayInChart="true" sortOrder="1" precision="0"
+                  chartTitle="@Strings.FitDfaLabel" dataLabel="@Strings.FitDfaLabel"
+                  unitLabel="@Strings.FitDfaUnit" fillColor="#FF5500" />
+    </fitContributions>
+</resources>

@@ -1,0 +1,5 @@
+project.manifest = manifest.xml
+
+# Default source path is ./source and default resource path is ./resources.
+# For the 218x218 Forerunner 255S: generate a font set with `python3 tools/gen_assets.py --scale 0.8385
+# --out resources-round-218x218`, keep only its fonts/ folder, and add fr255s/fr255sm to the manifest.

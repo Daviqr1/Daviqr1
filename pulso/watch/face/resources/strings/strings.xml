@@ -1,0 +1,38 @@
+<strings>
+    <string id="AppName">Pulso</string>
+
+    <!-- face (pt-BR). Weekdays/months: fixed 3 letters + space, sliced by position in Render.mc -->
+    <string id="Weekdays">DOM SEG TER QUA QUI SEX SÁB</string>
+    <string id="Months">JAN FEV MAR ABR MAI JUN JUL AGO SET OUT NOV DEZ</string>
+    <string id="LblActivation">ATIVAÇÃO</string>
+    <string id="LblStress">ESTRESSE</string>
+    <string id="LblGarmin">garmin</string>
+    <string id="LblPeak1">pico</string>
+    <string id="LblPeakN">picos</string>
+    <string id="LblNoPeaks">sem picos hoje</string>
+    <string id="LblAgenda">agenda</string>
+    <string id="HintConfigure">Configure URL e token no app Garmin Connect</string>
+    <string id="AgeNow">agora</string>
+    <string id="StOk">ok</string>
+    <string id="StNoPhone">sem cel.</string>
+    <string id="StToken">token?</string>
+    <string id="StConfig">config?</string>
+    <string id="StTimeout">timeout</string>
+    <string id="StError">erro</string>
+    <string id="StPaused">pausado</string>
+    <string id="StWait">aguardando</string>
+
+    <!-- settings (Garmin Connect / Connect IQ app) -->
+    <string id="SetUrlTitle">URL da central</string>
+    <string id="SetUrlPrompt">https://sua-central (HTTPS com certificado público)</string>
+    <string id="SetTokenTitle">Token do aparelho</string>
+    <string id="SetTokenPrompt">pulso_dev_… (gerado pela central)</string>
+    <string id="SetUploadTitle">Enviar dados para a central</string>
+    <string id="SetSecondsTitle">Mostrar segundos</string>
+    <string id="SetRingTitle">Anel das últimas 12 h</string>
+    <string id="RingAuto">Automático (central, senão Garmin)</string>
+    <string id="RingCentral">Só ativação da central</string>
+    <string id="RingGarmin">Só estresse Garmin</string>
+    <string id="SetSaverTitle">Economia automática de bateria</string>
+    <string id="SetDeviceIdTitle">ID deste relógio</string>
+</strings>

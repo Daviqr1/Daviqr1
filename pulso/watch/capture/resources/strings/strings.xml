@@ -1,0 +1,72 @@
+<strings>
+    <string id="AppName">Pulso Captura</string>
+
+    <!-- menus -->
+    <string id="MenuTitle">Pulso</string>
+    <string id="MStart">Iniciar captura</string>
+    <string id="MStop">Parar captura</string>
+    <string id="MMode">Modo</string>
+    <string id="MMark">Marcar evento</string>
+    <string id="MFit">Gravar FIT (TREINO)</string>
+    <string id="MSend">Enviar agora</string>
+    <string id="MModeTitle">Modo de captura</string>
+    <string id="MMarkTitle">Marcar</string>
+
+    <string id="ModeFoco">FOCO</string>
+    <string id="ModeFocoSub">reuniões: RR, movimento, pressão</string>
+    <string id="ModeSono">SONO</string>
+    <string id="ModeSonoSub">noite: tela escura, envio a cada 10 min</string>
+    <string id="ModeTreino">TREINO</string>
+    <string id="ModeTreinoSub">RR, DFA α1, FIT</string>
+    <string id="ModeMax">MAX</string>
+    <string id="ModeMaxSub">tudo, FIT bruto na taxa máxima</string>
+
+    <string id="MkStress">estresse</string>
+    <string id="MkCafe">café</string>
+    <string id="MkMeetStart">reunião começou</string>
+    <string id="MkMeetEnd">reunião acabou</string>
+    <string id="MkPause">pausa</string>
+
+    <!-- status screen -->
+    <string id="PressStart">START para iniciar</string>
+    <string id="Recording">gravando</string>
+    <string id="Queue">fila</string>
+    <string id="NoCentral">configure a central</string>
+    <string id="NoPhone">sem celular</string>
+    <string id="Sending">enviando</string>
+    <string id="AuthErr">token inválido</string>
+    <string id="LinkOk">ok há</string>
+    <string id="LinkIdle">nada enviado</string>
+    <string id="LinkErr">erro</string>
+    <string id="Quality">RR</string>
+    <string id="Aerobic">AERÓBIO</string>
+    <string id="Transition">TRANSIÇÃO</string>
+    <string id="Anaerobic">ANAERÓBIO</string>
+    <string id="SensorErr">erro no sensor</string>
+    <string id="FitOn">FIT gravando</string>
+    <string id="FitOff">FIT desligado</string>
+    <string id="FitErr">FIT erro</string>
+    <string id="Saved">captura salva</string>
+    <string id="BatLow">bateria baixa: captura salva</string>
+    <string id="Marked">marcado:</string>
+    <string id="Details">detalhes</string>
+    <string id="Sent">enviados</string>
+    <string id="Dropped">descartados</string>
+
+    <!-- confirmations -->
+    <string id="ConfirmStop">Parar captura?</string>
+    <string id="ConfirmExit">Parar captura e sair?</string>
+
+    <!-- settings (Garmin Connect) -->
+    <string id="SUrlTitle">URL da central</string>
+    <string id="SUrlPrompt">https://sua-central.exemplo (sem /v1)</string>
+    <string id="STokenTitle">Token do aparelho</string>
+    <string id="STokenPrompt">pulso_dev_...</string>
+    <string id="SModeTitle">Modo padrão</string>
+    <string id="SBudgetTitle">Orçamento de bateria (%/h)</string>
+    <string id="SSleepBudgetTitle">Orçamento no SONO (%/h)</string>
+    <string id="SBudgetError">Use um valor entre 0.5 e 20</string>
+    <string id="SFloorTitle">Bateria mínima para capturar (%)</string>
+    <string id="SFloorError">Use um valor entre 5 e 50</string>
+    <string id="SFitTitle">Gravar FIT no TREINO</string>
+</strings>

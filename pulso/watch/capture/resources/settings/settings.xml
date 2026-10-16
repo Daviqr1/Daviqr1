@@ -1,0 +1,28 @@
+<settings>
+    <setting propertyKey="@Properties.centralUrl" title="@Strings.SUrlTitle" prompt="@Strings.SUrlPrompt">
+        <settingConfig type="url" />
+    </setting>
+    <setting propertyKey="@Properties.deviceToken" title="@Strings.STokenTitle" prompt="@Strings.STokenPrompt">
+        <settingConfig type="password" />
+    </setting>
+    <setting propertyKey="@Properties.defaultMode" title="@Strings.SModeTitle">
+        <settingConfig type="list">
+            <listEntry value="0">@Strings.ModeFoco</listEntry>
+            <listEntry value="1">@Strings.ModeSono</listEntry>
+            <listEntry value="2">@Strings.ModeTreino</listEntry>
+            <listEntry value="3">@Strings.ModeMax</listEntry>
+        </settingConfig>
+    </setting>
+    <setting propertyKey="@Properties.budgetPctH" title="@Strings.SBudgetTitle">
+        <settingConfig type="numeric" min="0" max="20" errorMessage="@Strings.SBudgetError" />
+    </setting>
+    <setting propertyKey="@Properties.sleepBudgetPctH" title="@Strings.SSleepBudgetTitle">
+        <settingConfig type="numeric" min="0" max="20" errorMessage="@Strings.SBudgetError" />
+    </setting>
+    <setting propertyKey="@Properties.floorPct" title="@Strings.SFloorTitle">
+        <settingConfig type="numeric" min="5" max="50" errorMessage="@Strings.SFloorError" />
+    </setting>
+    <setting propertyKey="@Properties.fitEnabled" title="@Strings.SFitTitle">
+        <settingConfig type="boolean" />
+    </setting>
+</settings>

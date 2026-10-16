@@ -1,0 +1,15 @@
+<menus>
+    <menu2 id="ModeMenu" title="@Strings.MModeTitle">
+        <menu-item id="m0" label="@Strings.ModeFoco" subLabel="@Strings.ModeFocoSub" />
+        <menu-item id="m1" label="@Strings.ModeSono" subLabel="@Strings.ModeSonoSub" />
+        <menu-item id="m2" label="@Strings.ModeTreino" subLabel="@Strings.ModeTreinoSub" />
+        <menu-item id="m3" label="@Strings.ModeMax" subLabel="@Strings.ModeMaxSub" />
+    </menu2>
+    <menu2 id="MarkMenu" title="@Strings.MMarkTitle">
+        <menu-item id="k0" label="@Strings.MkStress" />
+        <menu-item id="k1" label="@Strings.MkCafe" />
+        <menu-item id="k2" label="@Strings.MkMeetStart" />
+        <menu-item id="k3" label="@Strings.MkMeetEnd" />
+        <menu-item id="k4" label="@Strings.MkPause" />
+    </menu2>
+</menus>
